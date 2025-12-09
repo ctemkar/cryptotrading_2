@@ -1,0 +1,292 @@
+/*// backend/server.js
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const WebSocket = require("ws");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());
+app.get("/", (req, res) => res.send("Crypto + Models backend running"));
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+/*
+ * CONFIG:
+ * - SYMBOLS: which Binance trade streams we subscribe to (lowercase)
+ * - MODELS: each model has starting cash and holdings { SYMBOL: qty }
+ *    Note: SYMBOL format must match Binance (e.g. BTCUSDT)
+ */
+/*const SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "lunausdt"];
+const SYMBOLS_UPPER = SYMBOLS.map(s => s.toUpperCase());
+
+const MODELS = [
+  {
+    id: "gemini-3-pro",
+    name: "Gemini-3-pro",
+    color: "#2b8a3e",
+    startingCash: 10000,
+    holdings: { BTCUSDT: 0.4, ETHUSDT: 2.0 } // example qty
+  },
+  {
+    id: "qwen-3-max",
+    name: "Qwen-3-max",
+    color: "#1f77b4",
+    startingCash: 10000,
+    holdings: { BTCUSDT: 0.2, SOLUSDT: 10 }
+  },
+  {
+    id: "gpt-5.1",
+    name: "gpt-5.1",
+    color: "#9467bd",
+    startingCash: 10000,
+    holdings: { ETHUSDT: 3.5 }
+  },
+  {
+    id: "claude-sonnet-4-5",
+    name: "claude-sonnet-4-5",
+    color: "#ff7f0e",
+    startingCash: 10000,
+    holdings: { BTCUSDT: 0.1, ETHUSDT: 1.0, LUNAUSDT: 50 }
+  },
+  {
+    id: "mystery-model",
+    name: "Mystery Model",
+    color: "#000000",
+    startingCash: 10000,
+    holdings: { BTCUSDT: 0.25, ETHUSDT: 1.5, SOLUSDT: 8 }
+  }
+];
+
+// internal state
+const latestPrices = {};             // { 'BTCUSDT': price, ... }
+const modelHistory = {};             // { modelId: [{time, accountValue}, ...] }
+const MAX_HISTORY = 200;             // points per model
+
+// init history with starting cash (timestamp = now-...)
+const now = Date.now();
+MODELS.forEach(m => {
+  modelHistory[m.id] = [{ time: now, accountValue: m.startingCash }];
+});
+
+const streams = SYMBOLS.map(s => `${s}@trade`).join("/");
+const BINANCE_WS = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+
+let binanceSocket;
+function connectBinance() {
+  binanceSocket = new WebSocket(BINANCE_WS);
+
+  binanceSocket.on("open", () => {
+    console.log("Connected to Binance stream:", BINANCE_WS);
+  });
+
+  binanceSocket.on("message", (msg) => {
+    try {
+      const parsed = JSON.parse(msg);
+      const data = parsed.data;
+      if (!data) return;
+      if (data.e === "trade") {
+        const symbol = data.s;            // "BTCUSDT"
+        const price = parseFloat(data.p); // trade price
+        const time = data.T;
+
+        // update latest price
+        latestPrices[symbol] = price;
+
+        // Recalculate all models' account value
+        const modelsOut = MODELS.map(m => {
+          // account value = startingCash + sum(qty * latestPrice) 
+          //   (assuming holdings were bought from startingCash already for simplicity)
+          let holdingsValue = 0;
+          for (const [sym, qty] of Object.entries(m.holdings)) {
+            const p = latestPrices[sym] ?? 0;
+            holdingsValue += (p * qty);
+          }
+          const accountValue = +(m.startingCash + holdingsValue).toFixed(2);
+          // push history
+          const hist = modelHistory[m.id] || [];
+          hist.push({ time, accountValue });
+          if (hist.length > MAX_HISTORY) hist.shift();
+          modelHistory[m.id] = hist;
+          return {
+            id: m.id,
+            name: m.name,
+            color: m.color,
+            accountValue,
+            time
+          };
+        });
+
+        // Emit a lightweight model update immediately for frontend
+        io.emit("models_update", modelsOut);
+
+        // Also emit price update (keep backward compatibility)
+        io.emit("crypto_update", {
+          symbol,
+          price,
+          qty: parseFloat(data.q),
+          time
+        });
+      }
+    } catch (err) {
+      console.error("binance parse err", err);
+    }
+  });
+
+  binanceSocket.on("close", () => {
+    console.log("Binance socket closed. Reconnect in 2s...");
+    setTimeout(connectBinance, 2000);
+  });
+
+  binanceSocket.on("error", (err) => {
+    console.error("Binance socket error:", err);
+    try { binanceSocket.close(); } catch(e){}
+  });
+}
+
+// Serve a simple endpoint to fetch historical model series
+app.get("/api/models/history", (req, res) => {
+  // optionally accept ?model=gemini-3-pro
+  const modelId = req.query.model;
+  if (modelId) {
+    return res.json({ modelId, history: modelHistory[modelId] || [] });
+  }
+  // return all models summarized
+  const result = MODELS.map(m => ({ id: m.id, name: m.name, color: m.color, history: modelHistory[m.id] || [] }));
+  res.json(result);
+});
+
+io.on("connection", (socket) => {
+  console.log("Frontend connected:", socket.id);
+
+  // send initial model snapshot + latest prices
+  const snapshot = MODELS.map(m => ({
+    id: m.id,
+    name: m.name,
+    color: m.color,
+    accountValue: (modelHistory[m.id].length ? modelHistory[m.id].slice(-1)[0].accountValue : m.startingCash),
+    history: modelHistory[m.id]
+  }));
+  socket.emit("models_snapshot", snapshot);
+  socket.emit("prices_snapshot", latestPrices);
+
+  socket.on("disconnect", () => {
+    console.log("Frontend disconnected:", socket.id);
+  });
+});
+
+// start server
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Backend listening on http://localhost:${PORT}`);
+  connectBinance();
+}); */
+
+// backend/server.js
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
+
+/* ------------------------------
+   MODELS INITIAL STATE
+--------------------------------*/
+const MODELS = [
+  { id: "gemini-3-pro", name: "Gemini-3-pro", color: "#1f77b4" },
+  { id: "qwen-3-max", name: "Qwen-3-max", color: "#ff7f0e" },
+  { id: "gpt-5.1", name: "GPT-5.1", color: "#2ca02c" },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", color: "#d62728" },
+  { id: "mystery-model", name: "Mystery Model", color: "#9467bd" }
+];
+
+let modelState = {};          // latest values
+let modelHistory = {};        // time → values
+
+// initialize starting values
+MODELS.forEach(m => {
+  modelState[m.id] = {
+    id: m.id,
+    name: m.name,
+    color: m.color,
+    accountValue: 100000 + Math.random() * 10000
+  };
+  modelHistory[m.id] = [];
+});
+
+/* ----------------------------------------
+   HELPER — CREATE FLUCTUATIONS
+-----------------------------------------*/
+function fluctuate(value) {
+  const percent = (Math.random() * 8 - 4) / 100;   // -4% to +4%
+  return value * (1 + percent);
+}
+
+/* ----------------------------------------
+   SEND SNAPSHOT ON CONNECT
+-----------------------------------------*/
+io.on("connection", socket => {
+  console.log("Client connected:", socket.id);
+
+  const snapshot = MODELS.map(m => ({
+    id: m.id,
+    name: m.name,
+    color: m.color,
+    accountValue: modelState[m.id].accountValue,
+    history: modelHistory[m.id]
+  }));
+
+  socket.emit("models_snapshot", snapshot);
+});
+
+/* ----------------------------------------
+   UPDATE EVERY 1.5 SECONDS
+-----------------------------------------*/
+setInterval(() => {
+  const now = Date.now();
+  const updates = [];
+
+  MODELS.forEach(m => {
+    let prev = modelState[m.id].accountValue;
+
+    // apply fluctuation
+    let updated = fluctuate(prev);
+
+    // store latest
+    modelState[m.id].accountValue = updated;
+
+    // store history
+    modelHistory[m.id].push({
+      time: now,
+      accountValue: updated
+    });
+
+    if (modelHistory[m.id].length > 200)
+      modelHistory[m.id].shift();
+
+    updates.push({
+      id: m.id,
+      name: m.name,
+      color: m.color,
+      accountValue: updated,
+      time: now
+    });
+  });
+
+  // send to all clients
+  io.emit("models_update", updates);
+
+}, 1500);
+
+server.listen(3001, () => {
+  console.log("Backend running on port 3001");
+});
+
