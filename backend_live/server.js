@@ -20,7 +20,8 @@ const MODELS = [
   { id: "qwen-3-max",        name: "Qwen-3-max",        color: "#ff7f0e", volatility: 0.3 },
   { id: "gpt-5.1",           name: "GPT-5.1",           color: "#2ca02c", volatility: 0.7 },
   { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", color: "#d62728", volatility: 0.4 },
-  { id: "mystery-model",     name: "Mystery Model",     color: "#9467bd", volatility: 1.0 }
+  { id: "mystery-model",     name: "Mystery Model",     color: "#9467bd", volatility: 1.0 },
+  { id: "deepseek",          name: "DeepSeek",          color: "#8e24aa", volatility: 0.6 }
 ];
 
 const STARTING_VALUE = 10000;
