@@ -42,31 +42,32 @@ MODELS.forEach(m => {
   modelHistory[m.id] = [{ time: Date.now(), accountValue: STARTING_VALUE }];
 });
 
-/* ----------------------------------------
-   SEND SNAPSHOT ON CONNECT
------------------------------------------*/
-io.on("connection", socket => {
-  console.log("Client connected:", socket.id);
+/* ------------------------------
+   CRYPTO PRICES INITIAL STATE
+--------------------------------*/
+const CRYPTO_SYMBOLS = [
+  { symbol: "BTCUSDT", name: "Bitcoin", startPrice: 95000, volatility: 0.002 },
+  { symbol: "ETHUSDT", name: "Ethereum", startPrice: 3500, volatility: 0.003 },
+  { symbol: "SOLUSDT", name: "Solana", startPrice: 180, volatility: 0.004 }
+];
 
-  const snapshot = MODELS.map(m => ({
-    id: m.id,
-    name: m.name,
-    color: m.color,
-    accountValue: modelState[m.id].accountValue,
-    history: modelHistory[m.id]
-  }));
+let cryptoPrices = {};
+let cryptoHistory = {};
 
-  socket.emit("models_snapshot", snapshot);
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
+// Initialize crypto prices
+CRYPTO_SYMBOLS.forEach(c => {
+  cryptoPrices[c.symbol] = c.startPrice;
+  cryptoHistory[c.symbol] = [{ time: Date.now(), price: c.startPrice }];
 });
 
 /* ----------------------------------------
-   UPDATE EVERY 1.5 SECONDS
+   CONFIGURABLE UPDATE INTERVAL
 -----------------------------------------*/
-setInterval(() => {
+let UPDATE_INTERVAL = 1500; // Default 1.5 seconds
+let updateIntervalId = null;
+
+// Function to update model values
+function updateModels() {
   const now = Date.now();
   const updates = [];
 
@@ -111,9 +112,109 @@ setInterval(() => {
 
   // Send to all clients
   io.emit("models_update", updates);
+}
 
-}, 1500);
+// Function to update crypto prices
+function updateCryptoPrices() {
+  const now = Date.now();
+  const updates = {};
+
+  CRYPTO_SYMBOLS.forEach(c => {
+    const prev = cryptoPrices[c.symbol];
+
+    // Random walk for crypto prices
+    const change = (Math.random() * 2 - 1) * prev * c.volatility;
+    let updated = prev + change;
+
+    // Keep price positive and reasonable
+    if (updated < prev * 0.5) updated = prev * 0.5; // Don't drop below 50%
+    if (updated > prev * 1.5) updated = prev * 1.5; // Don't rise above 150%
+
+    // Round to 2 decimals
+    const newPrice = Math.round(updated * 100) / 100;
+
+    // Store latest
+    cryptoPrices[c.symbol] = newPrice;
+
+    // Store history
+    cryptoHistory[c.symbol].push({
+      time: now,
+      price: newPrice
+    });
+
+    if (cryptoHistory[c.symbol].length > MAX_HISTORY) {
+      cryptoHistory[c.symbol].shift();
+    }
+
+    console.log("CRYPTO PRICE", c.symbol, newPrice);
+
+    updates[c.symbol] = newPrice;
+  });
+
+  // Send to all clients
+  io.emit("crypto_update", {
+    latest: updates,
+    time: now
+  });
+}
+
+// Function to start the update interval
+function startUpdateInterval() {
+  if (updateIntervalId) {
+    clearInterval(updateIntervalId);
+  }
+  
+  updateIntervalId = setInterval(() => {
+    updateModels();
+    updateCryptoPrices();
+  }, UPDATE_INTERVAL);
+  
+  console.log(`Update interval set to ${UPDATE_INTERVAL}ms`);
+}
+
+/* ----------------------------------------
+   SEND SNAPSHOT ON CONNECT
+-----------------------------------------*/
+io.on("connection", socket => {
+  console.log("Client connected:", socket.id);
+
+  // Send models snapshot
+  const modelsSnapshot = MODELS.map(m => ({
+    id: m.id,
+    name: m.name,
+    color: m.color,
+    accountValue: modelState[m.id].accountValue,
+    history: modelHistory[m.id]
+  }));
+
+  socket.emit("models_snapshot", modelsSnapshot);
+
+  // Send crypto prices snapshot
+  const cryptoSnapshot = {
+    latest: cryptoPrices,
+    history: cryptoHistory,
+    time: Date.now()
+  };
+
+  socket.emit("crypto_snapshot", cryptoSnapshot);
+
+  // Handle update speed changes from client
+  socket.on("setUpdateSpeed", (newSpeed) => {
+    console.log(`Update speed changed to: ${newSpeed}ms`);
+    UPDATE_INTERVAL = newSpeed;
+    startUpdateInterval(); // Restart interval with new speed
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+  });
+});
+
+// Start the update interval when server starts
+startUpdateInterval();
 
 server.listen(3001, () => {
   console.log("Backend running on port 3001");
+  console.log("Models initialized:", MODELS.map(m => m.name).join(", "));
+  console.log("Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
 });

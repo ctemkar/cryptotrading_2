@@ -6,22 +6,103 @@ import useCryptoPrices from '../hooks/useCryptoPrices';
 import socket from '../services/socket';
 
 function Dashboard() {
-  const [stopLoss, setStopLoss] = useState('');
-  const [profitTarget, setProfitTarget] = useState('');
-  const [startingValue, setStartingValue] = useState('10000');
-  const [isTrading, setIsTrading] = useState(false);
+  // ✅ NEW: Track the last user-set starting value separately
+  const [lastSetStartingValue, setLastSetStartingValue] = useState(() => {
+    const saved = localStorage.getItem('lastSetStartingValue');
+    return saved || '1000'; // Default to 1000 on first load
+  });
+
+  // Load saved values from localStorage or use defaults
+  const [stopLoss, setStopLoss] = useState(() => localStorage.getItem('stopLoss') || '');
+  const [profitTarget, setProfitTarget] = useState(() => localStorage.getItem('profitTarget') || '');
+  const [startingValue, setStartingValue] = useState(() => {
+    const saved = localStorage.getItem('startingValue');
+    return saved || '1000'; // Default to 1000 on first load
+  });
+  const [isTrading, setIsTrading] = useState(() => {
+    const saved = localStorage.getItem('isTrading');
+    return saved === 'true';
+  });
   const [tradingStopped, setTradingStopped] = useState(false);
   const [stopReason, setStopReason] = useState('');
-  const [selectedModels, setSelectedModels] = useState([]);
-  const [initialValues, setInitialValues] = useState({});
+  const [selectedModels, setSelectedModels] = useState(() => {
+    const saved = localStorage.getItem('selectedModels');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [initialValues, setInitialValues] = useState(() => {
+    const saved = localStorage.getItem('initialValues');
+    return saved ? JSON.parse(saved) : {};
+  });
   const [socketConnected, setSocketConnected] = useState(false);
+  const [updateSpeed, setUpdateSpeed] = useState(() => localStorage.getItem('updateSpeed') || '1500');
 
   const { modelsLatest, modelsHistory } = useModels();
   const { latest: cryptoLatest, history: cryptoHistory } = useCryptoPrices();
 
   const availableModels = Object.values(modelsLatest);
-  const startValue = parseFloat(startingValue) || 10000;
+  const startValue = parseFloat(startingValue) || 1000;
   const currentPrice = cryptoLatest.BTCUSDT || null;
+
+  // Speed presets
+  const speedPresets = [
+    { label: 'Very Fast (0.5s)', value: '500' },
+    { label: 'Fast (1s)', value: '1000' },
+    { label: 'Normal (1.5s)', value: '1500' },
+    { label: 'Slow (3s)', value: '3000' },
+    { label: 'Very Slow (5s)', value: '5000' }
+  ];
+
+  // ✅ ONE-TIME MIGRATION: Reset old 10000 values to 1000 for all users
+  useEffect(() => {
+    const currentStart = localStorage.getItem('startingValue');
+    const currentLast = localStorage.getItem('lastSetStartingValue');
+
+    // If user had old default of 10000, reset to 1000
+    if (currentStart === '10000') {
+      localStorage.setItem('startingValue', '1000');
+      setStartingValue('1000');
+      console.log('✅ Migrated startingValue from 10000 to 1000');
+    }
+    if (currentLast === '10000') {
+      localStorage.setItem('lastSetStartingValue', '1000');
+      setLastSetStartingValue('1000');
+      console.log('✅ Migrated lastSetStartingValue from 10000 to 1000');
+    }
+  }, []); // Run once on mount
+
+  // Save to localStorage whenever values change
+  useEffect(() => {
+    localStorage.setItem('stopLoss', stopLoss);
+  }, [stopLoss]);
+
+  useEffect(() => {
+    localStorage.setItem('profitTarget', profitTarget);
+  }, [profitTarget]);
+
+  useEffect(() => {
+    localStorage.setItem('startingValue', startingValue);
+  }, [startingValue]);
+
+  useEffect(() => {
+    localStorage.setItem('selectedModels', JSON.stringify(selectedModels));
+  }, [selectedModels]);
+
+  useEffect(() => {
+    localStorage.setItem('updateSpeed', updateSpeed);
+  }, [updateSpeed]);
+
+  useEffect(() => {
+    localStorage.setItem('isTrading', isTrading.toString());
+  }, [isTrading]);
+
+  useEffect(() => {
+    localStorage.setItem('initialValues', JSON.stringify(initialValues));
+  }, [initialValues]);
+
+  // ✅ NEW: Save lastSetStartingValue to localStorage
+  useEffect(() => {
+    localStorage.setItem('lastSetStartingValue', lastSetStartingValue);
+  }, [lastSetStartingValue]);
 
   // Calculate normalized value for a model
   const getNormalizedValue = (modelId) => {
@@ -29,19 +110,19 @@ function Dashboard() {
     if (!model || typeof model.accountValue !== 'number') {
       return startValue;
     }
-    
-    // If trading hasn't started, show the actual current value
+
+    // If we haven't captured a baseline for this model yet, show raw
     if (!initialValues[modelId]) {
       return Math.round(model.accountValue);
     }
-    
+
     // If trading has started, normalize based on starting value
     const actualInitial = initialValues[modelId];
     const actualCurrent = model.accountValue;
-    
+
     // Calculate percentage change from the model's actual initial value
     const percentChange = (actualCurrent - actualInitial) / actualInitial;
-    
+
     // Apply that percentage change to our starting value
     return Math.round(startValue * (1 + percentChange));
   };
@@ -75,6 +156,14 @@ function Dashboard() {
     };
   }, []);
 
+  // Send update speed to backend when it changes
+  useEffect(() => {
+    if (socketConnected) {
+      socket.emit('setUpdateSpeed', parseInt(updateSpeed));
+      console.log('Update speed set to:', updateSpeed, 'ms');
+    }
+  }, [updateSpeed, socketConnected]);
+
   // Monitor model values when trading is active
   useEffect(() => {
     if (!isTrading || selectedModels.length === 0) return;
@@ -106,11 +195,15 @@ function Dashboard() {
     });
   }, [modelsLatest, isTrading, stopLoss, profitTarget, selectedModels, initialValues, startValue]);
 
-  // Numeric-only handlers
+  // ✅ UPDATED: Numeric-only handler that also updates lastSetStartingValue
   const handleStartingValueChange = (e) => {
     const value = e.target.value;
     if (value === '' || /^\d*\.?\d*$/.test(value)) {
       setStartingValue(value);
+      // Update the "last set" value whenever user manually changes it
+      if (value !== '') {
+        setLastSetStartingValue(value);
+      }
     }
   };
 
@@ -126,6 +219,10 @@ function Dashboard() {
     if (value === '' || /^\d*\.?\d*$/.test(value)) {
       setProfitTarget(value);
     }
+  };
+
+  const handleUpdateSpeedChange = (e) => {
+    setUpdateSpeed(e.target.value);
   };
 
   // Selection handler
@@ -168,12 +265,11 @@ function Dashboard() {
       return;
     }
 
-    // Store the actual current values as initial values for each model
+    // ✅ IMPORTANT: Store initial values for ALL models (selected + non-selected)
     const initVals = {};
-    selectedModels.forEach(id => {
-      const model = modelsLatest[id];
-      // Store the actual accountValue at the moment trading starts
-      initVals[id] = model?.accountValue || sv;
+    Object.keys(modelsLatest).forEach((id) => {
+      const m = modelsLatest[id];
+      initVals[id] = m?.accountValue || sv;
     });
     setInitialValues(initVals);
 
@@ -188,16 +284,31 @@ function Dashboard() {
     setStopReason('Trading stopped manually');
   };
 
+  // ✅ UPDATED: Reset now restores to lastSetStartingValue instead of hardcoded 1000
   const handleReset = () => {
     setIsTrading(false);
     setTradingStopped(false);
     setStopReason('');
     setStopLoss('');
     setProfitTarget('');
-    setStartingValue('10000');
+    setStartingValue(lastSetStartingValue); // ✅ Restore to last user-set value
     setSelectedModels([]);
     setInitialValues({});
+
+    // Clear localStorage (except lastSetStartingValue)
+    localStorage.removeItem('stopLoss');
+    localStorage.removeItem('profitTarget');
+    localStorage.setItem('startingValue', lastSetStartingValue); // ✅ Keep the last set value
+    localStorage.removeItem('selectedModels');
+    localStorage.removeItem('isTrading');
+    localStorage.removeItem('initialValues');
   };
+
+  // Filter non-selected models for "Other Models Overview"
+  const nonSelectedModels = availableModels.filter((model, idx) => {
+    const modelId = model.id || model.name || `model_${idx}`;
+    return !selectedModels.includes(modelId);
+  });
 
   return (
     <div className="dashboard">
@@ -230,6 +341,54 @@ function Dashboard() {
             <strong>Selected Models:</strong>{' '}
             {selectedModels.length > 0 ? `✅ ${selectedModels.length} selected` : '⚠️ None selected'}
           </div>
+          <div>
+            <strong>Update Speed:</strong> {parseInt(updateSpeed) / 1000}s
+          </div>
+          <div>
+            <strong>Trading Status:</strong>{' '}
+            {isTrading ? '🟢 Active (Persisted)' : '⚪ Inactive'}
+          </div>
+        </div>
+      </div>
+
+      {/* Update Speed Control */}
+      <div
+        style={{
+          background: '#fff3e0',
+          padding: '15px',
+          borderRadius: '8px',
+          marginBottom: '20px',
+          border: '2px solid #ff9800'
+        }}
+      >
+        <h3 style={{ marginTop: 0, marginBottom: '10px' }}>⚡ Trading Speed Control</h3>
+        <div style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ fontWeight: 'bold' }}>Update Interval:</label>
+          <select
+            value={updateSpeed}
+            onChange={handleUpdateSpeedChange}
+            style={{
+              padding: '8px 12px',
+              fontSize: '14px',
+              borderRadius: '4px',
+              border: '2px solid #ff9800',
+              backgroundColor: 'white',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            {speedPresets.map(preset => (
+              <option key={preset.value} value={preset.value}>
+                {preset.label}
+              </option>
+            ))}
+          </select>
+          <span style={{ fontSize: '13px', color: '#666' }}>
+            Models and prices will update every {parseInt(updateSpeed) / 1000} second{parseInt(updateSpeed) !== 1000 ? 's' : ''}
+          </span>
+          <span style={{ fontSize: '12px', color: '#4CAF50', fontWeight: 'bold', marginLeft: 'auto' }}>
+            ✓ Settings saved automatically
+          </span>
         </div>
       </div>
 
@@ -254,7 +413,7 @@ function Dashboard() {
               const modelId = model.id || model.name || `model_${index}`;
               const isSelected = selectedModels.includes(modelId);
               const color = model.color || '#1976d2';
-              
+
               // Show live value (normalized if trading, actual if not)
               const currentValue = getNormalizedValue(modelId);
 
@@ -380,7 +539,7 @@ function Dashboard() {
               value={startingValue}
               onChange={handleStartingValueChange}
               disabled={isTrading}
-              placeholder="e.g., 10000"
+              placeholder="e.g., 1000"
               style={{
                 width: '100%',
                 padding: '10px',
@@ -405,7 +564,7 @@ function Dashboard() {
               value={stopLoss}
               onChange={handleStopLossChange}
               disabled={isTrading}
-              placeholder="e.g., 9500"
+              placeholder="e.g., 950"
               style={{
                 width: '100%',
                 padding: '10px',
@@ -429,7 +588,7 @@ function Dashboard() {
               value={profitTarget}
               onChange={handleProfitTargetChange}
               disabled={isTrading}
-              placeholder="e.g., 10500"
+              placeholder="e.g., 1050"
               style={{
                 width: '100%',
                 padding: '10px',
@@ -505,7 +664,7 @@ function Dashboard() {
             Stop Trading
           </button>
 
-          {tradingStopped && (
+          {(tradingStopped || (isTrading && selectedModels.length > 0)) && (
             <button
               onClick={handleReset}
               style={{
@@ -556,7 +715,7 @@ function Dashboard() {
           >
             <strong>Status: </strong>
             {isTrading
-              ? '🟢 Trading Active'
+              ? '🟢 Trading Active (Persisted across refresh)'
               : tradingStopped
               ? '🔴 Trading Stopped'
               : '🟡 Ready to Trade'}
@@ -572,7 +731,46 @@ function Dashboard() {
                 borderRadius: '4px'
               }}
             >
-              <strong>Monitoring Models (All started at ${startValue}):</strong>
+              {/* Header with Total Profit/Loss */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
+                <strong>Monitoring Models (All started at ${startValue.toLocaleString()}):</strong>
+
+                {/* Total Profit Display */}
+                {(() => {
+                  const totalProfit = selectedModels.reduce((sum, modelId) => {
+                    const currentValue = getNormalizedValue(modelId);
+                    return sum + (currentValue - startValue);
+                  }, 0);
+                  const totalProfitPercent = ((totalProfit / (startValue * selectedModels.length)) * 100).toFixed(2);
+
+                  return (
+                    <div
+                      style={{
+                        padding: '10px 20px',
+                        borderRadius: '6px',
+                        backgroundColor: '#ffffff',
+                        border: '2px solid #1976d2',
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.15)'
+                      }}
+                    >
+                      <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                        {selectedModels.length > 1 ? 'Total Profit/Loss' : 'Profit/Loss'}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: '20px',
+                          fontWeight: 'bold',
+                          color: totalProfit >= 0 ? '#2e7d32' : '#c62828'
+                        }}
+                      >
+                        {totalProfit >= 0 ? '+' : ''}${totalProfit.toLocaleString()} ({totalProfitPercent}%)
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Individual Model Cards */}
               <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                 {selectedModels.map(modelId => {
                   const model = modelsLatest[modelId];
@@ -631,7 +829,7 @@ function Dashboard() {
           )}
         </div>
 
-        {/* Models Overview (read-only display) */}
+        {/* Other Models Overview - Now shows Total P/L */}
         {availableModels.length > 0 && (
           <div
             style={{
@@ -642,34 +840,110 @@ function Dashboard() {
               border: '1px solid #90caf9'
             }}
           >
-            <h3 style={{ marginTop: 0, marginBottom: '12px' }}>All Models Overview (Live Values)</h3>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-              {availableModels.map((model, idx) => {
-                const modelId = model.id || model.name || `model_${idx}`;
-                const currentValue = getNormalizedValue(modelId);
-                
-                return (
-                  <div
-                    key={modelId}
-                    style={{
-                      padding: '10px 14px',
-                      borderRadius: '6px',
-                      backgroundColor: 'white',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                      minWidth: '160px',
-                      borderLeft: `4px solid ${model.color || '#1976d2'}`
-                    }}
-                  >
-                    <div style={{ fontWeight: 'bold', marginBottom: '4px', fontSize: '14px' }}>
-                      {model.name || modelId}
+            <h3 style={{ marginTop: 0, marginBottom: '12px' }}>
+              Other Models Overview (Live Values)
+              {selectedModels.length > 0 && (
+                <span style={{ fontSize: '14px', fontWeight: 'normal', color: '#666', marginLeft: '10px' }}>
+                  ({nonSelectedModels.length} not selected)
+                </span>
+              )}
+            </h3>
+
+            {/* Total P/L for Other Models */}
+            {isTrading && nonSelectedModels.length > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '10px',
+                  marginBottom: '12px'
+                }}
+              >
+                <div style={{ fontSize: '13px', color: '#555', fontWeight: 'bold' }}>
+                  Total P/L for Other Models:
+                </div>
+
+                {(() => {
+                  const otherTotalProfit = nonSelectedModels.reduce((sum, model, idx) => {
+                    const modelId = model.id || model.name || `model_${idx}`;
+                    const currentValue = getNormalizedValue(modelId);
+                    return sum + (currentValue - startValue);
+                  }, 0);
+
+                  const denom = startValue * nonSelectedModels.length;
+                  const otherTotalProfitPercent = denom > 0 ? ((otherTotalProfit / denom) * 100).toFixed(2) : '0.00';
+
+                  return (
+                    <div
+                      style={{
+                        padding: '10px 16px',
+                        borderRadius: '6px',
+                        backgroundColor: '#ffffff',
+                        border: '2px solid #90caf9',
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+                        fontWeight: 'bold',
+                        fontSize: '18px',
+                        color: otherTotalProfit >= 0 ? '#2e7d32' : '#c62828'
+                      }}
+                    >
+                      {otherTotalProfit >= 0 ? '+' : ''}${Math.abs(Math.round(otherTotalProfit)).toLocaleString()} ({otherTotalProfitPercent}%)
                     </div>
-                    <div style={{ fontSize: '16px' }}>
-                      Value: <strong>${currentValue.toLocaleString()}</strong>
+                  );
+                })()}
+              </div>
+            )}
+
+            {nonSelectedModels.length === 0 ? (
+              <div style={{ padding: '20px', textAlign: 'center', color: '#666', fontSize: '14px', fontStyle: 'italic' }}>
+                All models are currently selected for trading
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                {nonSelectedModels.map((model, idx) => {
+                  const modelId = model.id || model.name || `model_${idx}`;
+                  const currentValue = getNormalizedValue(modelId);
+
+                  // Calculate P&L for non-selected models too
+                  let pnl = 0;
+                  let pnlPercent = '0.00';
+                  if (isTrading && initialValues[modelId] != null) {
+                    pnl = currentValue - startValue;
+                    pnlPercent = ((pnl / startValue) * 100).toFixed(2);
+                  }
+
+                  return (
+                    <div
+                      key={modelId}
+                      style={{
+                        padding: '10px 14px',
+                        borderRadius: '6px',
+                        backgroundColor: 'white',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                        minWidth: '180px',
+                        borderLeft: `4px solid ${model.color || '#1976d2'}`
+                      }}
+                    >
+                      <div style={{ fontWeight: 'bold', marginBottom: '4px', fontSize: '14px' }}>
+                        {model.name || modelId}
+                      </div>
+
+                      <div style={{ fontSize: '16px' }}>
+                        Value: <strong>${currentValue.toLocaleString()}</strong>
+                      </div>
+
+                      {/* Show P&L for non-selected models when trading */}
+                      {isTrading && initialValues[modelId] != null && (
+                        <div style={{ fontSize: '12px', marginTop: '4px', color: pnl >= 0 ? '#2e7d32' : '#c62828', fontWeight: 'bold' }}>
+                          {pnl >= 0 ? '▲' : '▼'} ${Math.abs(pnl).toLocaleString()} ({pnlPercent}%)
+                        </div>
+                      )}
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
