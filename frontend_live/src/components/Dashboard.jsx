@@ -6,6 +6,31 @@ import useCryptoPrices from '../hooks/useCryptoPrices';
 import socket from '../services/socket';
 
 function Dashboard() {
+  // ✅ NEW: Google Login State
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userInfo, setUserInfo] = useState(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
+
+  // ✅ NEW: Trades State
+  const [trades, setTrades] = useState([]);
+  const [loadingTrades, setLoadingTrades] = useState(true);
+
+  // ✅ NEW: Gemini OAuth-like connection state
+  const [showGeminiModal, setShowGeminiModal] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
+  const [geminiApiSecret, setGeminiApiSecret] = useState(() => localStorage.getItem('geminiApiSecret') || '');
+  const [isGeminiConnected, setIsGeminiConnected] = useState(() => {
+    const saved = localStorage.getItem('isGeminiConnected');
+    return saved === 'true';
+  });
+  const [geminiBalance, setGeminiBalance] = useState(() => {
+    const saved = localStorage.getItem('geminiBalance');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [isGeminiConnecting, setIsGeminiConnecting] = useState(false);
+  const [geminiError, setGeminiError] = useState('');
+  const [geminiStep, setGeminiStep] = useState(1);
+
   // ✅ NEW: Track the last user-set starting value separately
   const [lastSetStartingValue, setLastSetStartingValue] = useState(() => {
     const saved = localStorage.getItem('lastSetStartingValue');
@@ -52,12 +77,272 @@ function Dashboard() {
     { label: 'Very Slow (5s)', value: '5000' }
   ];
 
+  // ✅ NEW: Fetch trades from backend
+  const fetchTrades = async () => {
+    try {
+      const response = await fetch('http://localhost:3001/api/trades');
+      const data = await response.json();
+      setTrades(data);
+      setLoadingTrades(false);
+    } catch (error) {
+      console.error('Error fetching trades:', error);
+      setLoadingTrades(false);
+    }
+  };
+
+  // ✅ NEW: Listen for real-time trade updates
+  useEffect(() => {
+    // Fetch initial trades
+    fetchTrades();
+
+    // Listen for new trades via Socket.io
+    socket.on('new_trade', (trade) => {
+      console.log('📊 New trade received:', trade);
+      setTrades((prev) => [trade, ...prev].slice(0, 20)); // Keep only last 20
+    });
+
+    return () => {
+      socket.off('new_trade');
+    };
+  }, []);
+
+  // ✅ NEW: Initialize Google Sign-In
+  useEffect(() => {
+    // Load Google Identity Services script
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    document.body.appendChild(script);
+
+    script.onload = () => {
+      // Check if user was previously logged in
+      const savedUser = localStorage.getItem('googleUser');
+      if (savedUser) {
+        try {
+          const user = JSON.parse(savedUser);
+          setUserInfo(user);
+          setIsAuthenticated(true);
+        } catch (e) {
+          console.error('Failed to parse saved user:', e);
+        }
+      }
+      setIsLoadingAuth(false);
+
+      // Initialize Google Sign-In
+      if (window.google) {
+        window.google.accounts.id.initialize({
+          client_id: '157143841270-n05ehn5d303vaije4bgg8gp3392l64ve.apps.googleusercontent.com',
+          callback: handleGoogleCallback
+        });
+      }
+    };
+
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, []);
+
+  // ✅ NEW: Handle Google Sign-In callback
+  const handleGoogleCallback = (response) => {
+    try {
+      // Decode JWT token to get user info
+      const payload = JSON.parse(atob(response.credential.split('.')[1]));
+      const user = {
+        email: payload.email,
+        name: payload.name,
+        picture: payload.picture,
+        sub: payload.sub
+      };
+
+      setUserInfo(user);
+      setIsAuthenticated(true);
+      localStorage.setItem('googleUser', JSON.stringify(user));
+      console.log('✅ User logged in:', user.email);
+    } catch (error) {
+      console.error('Failed to decode Google token:', error);
+      alert('Login failed. Please try again.');
+    }
+  };
+
+  // ✅ NEW: Render Google Sign-In button
+  const renderGoogleButton = () => {
+    if (window.google) {
+      window.google.accounts.id.renderButton(
+        document.getElementById('googleSignInButton'),
+        {
+          theme: 'filled_blue',
+          size: 'large',
+          text: 'signin_with',
+          shape: 'rectangular',
+          width: 280
+        }
+      );
+    }
+  };
+
+  // ✅ NEW: Trigger button render after auth check
+  useEffect(() => {
+    if (!isLoadingAuth && !isAuthenticated) {
+      setTimeout(renderGoogleButton, 100);
+    }
+  }, [isLoadingAuth, isAuthenticated]);
+
+  // ✅ NEW: Handle Logout
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setUserInfo(null);
+    localStorage.removeItem('googleUser');
+
+    // Also clear trading data on logout
+    setIsTrading(false);
+    setTradingStopped(false);
+    setStopReason('');
+    setSelectedModels([]);
+    setInitialValues({});
+
+    console.log('✅ User logged out');
+  };
+
+  // ✅ NEW: Persist Gemini connection
+  useEffect(() => {
+    if (geminiApiKey) localStorage.setItem('geminiApiKey', geminiApiKey);
+    else localStorage.removeItem('geminiApiKey');
+  }, [geminiApiKey]);
+
+  useEffect(() => {
+    if (geminiApiSecret) localStorage.setItem('geminiApiSecret', geminiApiSecret);
+    else localStorage.removeItem('geminiApiSecret');
+  }, [geminiApiSecret]);
+
+  useEffect(() => {
+    localStorage.setItem('isGeminiConnected', isGeminiConnected.toString());
+  }, [isGeminiConnected]);
+
+  useEffect(() => {
+    if (geminiBalance) localStorage.setItem('geminiBalance', JSON.stringify(geminiBalance));
+    else localStorage.removeItem('geminiBalance');
+  }, [geminiBalance]);
+
+  // ✅ NEW: Fetch Gemini balance on mount if already connected
+  useEffect(() => {
+    if (isGeminiConnected && geminiApiKey && geminiApiSecret) {
+      // Refresh balance on mount
+      refreshGeminiBalance();
+    }
+  }, []);
+
+  // ✅ NEW: Function to refresh Gemini balance
+  const refreshGeminiBalance = async () => {
+    if (!geminiApiKey || !geminiApiSecret) return;
+
+    try {
+      const response = await fetch('http://localhost:3001/api/gemini/balances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: geminiApiKey,
+          apiSecret: geminiApiSecret
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success) {
+        setGeminiBalance(data.balance);
+      }
+    } catch (error) {
+      console.error('Error refreshing Gemini balance:', error);
+    }
+  };
+
+  // ✅ NEW: OAuth-like Gemini connection handlers
+  const handleOpenGeminiModal = () => {
+    setShowGeminiModal(true);
+    setGeminiStep(1);
+    setGeminiError('');
+  };
+
+  const handleCloseGeminiModal = () => {
+    setShowGeminiModal(false);
+    setGeminiError('');
+  };
+
+  const handleGeminiAuthorize = async () => {
+    if (!geminiApiKey || !geminiApiSecret) {
+      setGeminiError('Please enter both API Key and API Secret');
+      return;
+    }
+
+    if (geminiApiKey.length < 10 || geminiApiSecret.length < 10) {
+      setGeminiError('API credentials appear invalid. Please check and try again.');
+      return;
+    }
+
+    try {
+      setIsGeminiConnecting(true);
+      setGeminiError('');
+      setGeminiStep(3);
+
+      // Call backend API to verify credentials and fetch real balance
+      const response = await fetch('http://localhost:3001/api/gemini/balances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: geminiApiKey,
+          apiSecret: geminiApiSecret
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to connect to Gemini');
+      }
+
+      setGeminiBalance(data.balance);
+      setIsGeminiConnected(true);
+
+      // Close modal after success
+      setTimeout(() => {
+        setShowGeminiModal(false);
+        setGeminiStep(1);
+      }, 800);
+
+    } catch (error) {
+      console.error('Gemini authorization failed:', error);
+      setGeminiError(error.message || 'Authorization failed. Please try again.');
+      setIsGeminiConnected(false);
+      setGeminiBalance(null);
+      setGeminiStep(2);
+    } finally {
+      setIsGeminiConnecting(false);
+    }
+  };
+
+  const handleGeminiDisconnect = () => {
+    if (window.confirm('Are you sure you want to disconnect your Gemini account?')) {
+      setGeminiApiKey('');
+      setGeminiApiSecret('');
+      setIsGeminiConnected(false);
+      setGeminiBalance(null);
+      localStorage.removeItem('geminiApiKey');
+      localStorage.removeItem('geminiApiSecret');
+      localStorage.removeItem('isGeminiConnected');
+      localStorage.removeItem('geminiBalance');
+    }
+  };
+
+  const handleOpenGeminiSite = () => {
+    window.open('https://exchange.gemini.com/settings/api', '_blank');
+    setGeminiStep(2);
+  };
+
   // ✅ ONE-TIME MIGRATION: Reset old 10000 values to 1000 for all users
   useEffect(() => {
     const currentStart = localStorage.getItem('startingValue');
     const currentLast = localStorage.getItem('lastSetStartingValue');
 
-    // If user had old default of 10000, reset to 1000
     if (currentStart === '10000') {
       localStorage.setItem('startingValue', '1000');
       setStartingValue('1000');
@@ -68,7 +353,7 @@ function Dashboard() {
       setLastSetStartingValue('1000');
       console.log('✅ Migrated lastSetStartingValue from 10000 to 1000');
     }
-  }, []); // Run once on mount
+  }, []);
 
   // Save to localStorage whenever values change
   useEffect(() => {
@@ -99,7 +384,6 @@ function Dashboard() {
     localStorage.setItem('initialValues', JSON.stringify(initialValues));
   }, [initialValues]);
 
-  // ✅ NEW: Save lastSetStartingValue to localStorage
   useEffect(() => {
     localStorage.setItem('lastSetStartingValue', lastSetStartingValue);
   }, [lastSetStartingValue]);
@@ -111,19 +395,14 @@ function Dashboard() {
       return startValue;
     }
 
-    // If we haven't captured a baseline for this model yet, show raw
     if (!initialValues[modelId]) {
       return Math.round(model.accountValue);
     }
 
-    // If trading has started, normalize based on starting value
     const actualInitial = initialValues[modelId];
     const actualCurrent = model.accountValue;
-
-    // Calculate percentage change from the model's actual initial value
     const percentChange = (actualCurrent - actualInitial) / actualInitial;
 
-    // Apply that percentage change to our starting value
     return Math.round(startValue * (1 + percentChange));
   };
 
@@ -195,12 +474,10 @@ function Dashboard() {
     });
   }, [modelsLatest, isTrading, stopLoss, profitTarget, selectedModels, initialValues, startValue]);
 
-  // ✅ UPDATED: Numeric-only handler that also updates lastSetStartingValue
   const handleStartingValueChange = (e) => {
     const value = e.target.value;
     if (value === '' || /^\d*\.?\d*$/.test(value)) {
       setStartingValue(value);
-      // Update the "last set" value whenever user manually changes it
       if (value !== '') {
         setLastSetStartingValue(value);
       }
@@ -225,7 +502,6 @@ function Dashboard() {
     setUpdateSpeed(e.target.value);
   };
 
-  // Selection handler
   const handleModelSelection = (modelId) => {
     if (isTrading) return;
     console.log('Card clicked for model:', modelId);
@@ -234,7 +510,6 @@ function Dashboard() {
     );
   };
 
-  // Trading handlers
   const handleStartTrading = () => {
     if (selectedModels.length === 0) {
       alert('Please select at least one model to trade');
@@ -265,7 +540,6 @@ function Dashboard() {
       return;
     }
 
-    // ✅ IMPORTANT: Store initial values for ALL models (selected + non-selected)
     const initVals = {};
     Object.keys(modelsLatest).forEach((id) => {
       const m = modelsLatest[id];
@@ -284,35 +558,498 @@ function Dashboard() {
     setStopReason('Trading stopped manually');
   };
 
-  // ✅ UPDATED: Reset now restores to lastSetStartingValue instead of hardcoded 1000
   const handleReset = () => {
     setIsTrading(false);
     setTradingStopped(false);
     setStopReason('');
     setStopLoss('');
     setProfitTarget('');
-    setStartingValue(lastSetStartingValue); // ✅ Restore to last user-set value
+    setStartingValue(lastSetStartingValue);
     setSelectedModels([]);
     setInitialValues({});
 
-    // Clear localStorage (except lastSetStartingValue)
     localStorage.removeItem('stopLoss');
     localStorage.removeItem('profitTarget');
-    localStorage.setItem('startingValue', lastSetStartingValue); // ✅ Keep the last set value
+    localStorage.setItem('startingValue', lastSetStartingValue);
     localStorage.removeItem('selectedModels');
     localStorage.removeItem('isTrading');
     localStorage.removeItem('initialValues');
   };
 
-  // Filter non-selected models for "Other Models Overview"
   const nonSelectedModels = availableModels.filter((model, idx) => {
     const modelId = model.id || model.name || `model_${idx}`;
     return !selectedModels.includes(modelId);
   });
 
+  // ✅ NEW: Format timestamp for trades table
+  const formatTimestamp = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  };
+
+  if (isLoadingAuth) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        minHeight: '100vh',
+        backgroundColor: '#f5f5f5'
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '24px', marginBottom: '20px' }}>🔄</div>
+          <div style={{ fontSize: '18px', color: '#666' }}>Loading...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        minHeight: '100vh',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        fontFamily: 'Arial, sans-serif'
+      }}>
+        <div style={{
+          backgroundColor: 'white',
+          padding: '50px 40px',
+          borderRadius: '16px',
+          boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
+          textAlign: 'center',
+          maxWidth: '400px',
+          width: '90%'
+        }}>
+          <div style={{ fontSize: '48px', marginBottom: '20px' }}>📈</div>
+          <h1 style={{ fontSize: '28px', marginBottom: '10px', color: '#333' }}>
+            Crypto Trading Dashboard
+          </h1>
+          <p style={{ fontSize: '16px', color: '#666', marginBottom: '30px' }}>
+            Sign in with Google to access your trading dashboard
+          </p>
+
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
+            <div id="googleSignInButton"></div>
+          </div>
+
+          <div style={{ fontSize: '12px', color: '#999', marginTop: '30px', lineHeight: '1.6' }}>
+            By signing in, you agree to our Terms of Service and Privacy Policy
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="dashboard">
-      <h1>Crypto Trading Dashboard</h1>
+      {/* User Info Header with Logout */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '15px 20px',
+        backgroundColor: '#667eea',
+        color: 'white',
+        borderRadius: '8px',
+        marginBottom: '20px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '24px' }}>Crypto Trading Dashboard</h1>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+          <img
+            src={userInfo?.picture}
+            alt={userInfo?.name}
+            style={{
+              width: '40px',
+              height: '40px',
+              borderRadius: '50%',
+              border: '2px solid white'
+            }}
+          />
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{userInfo?.name}</div>
+            <div style={{ fontSize: '12px', opacity: 0.9 }}>{userInfo?.email}</div>
+          </div>
+          <button
+            onClick={handleLogout}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: '1px solid white',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              transition: 'all 0.2s'
+            }}
+            onMouseOver={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.3)'}
+            onMouseOut={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.2)'}
+          >
+            Logout
+          </button>
+        </div>
+      </div>
+
+      {/* ✅ NEW: Gemini OAuth-like Connection Panel */}
+      <div
+        style={{
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          padding: '20px',
+          borderRadius: '12px',
+          marginBottom: '20px',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          color: 'white'
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px' }}>
+          <div style={{ flex: 1, minWidth: '250px' }}>
+            <h3 style={{ margin: 0, marginBottom: '8px', fontSize: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '28px' }}>💎</span>
+              Gemini Trading Account
+            </h3>
+
+            {!isGeminiConnected ? (
+              <>
+                <p style={{ margin: 0, fontSize: '14px', opacity: 0.9, marginBottom: '12px' }}>
+                  Connect your Gemini account to view your real balance
+                </p>
+                <button
+                  onClick={handleOpenGeminiModal}
+                  style={{
+                    padding: '12px 24px',
+                    backgroundColor: 'white',
+                    color: '#667eea',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontSize: '15px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                    transition: 'transform 0.2s',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}
+                  onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
+                  onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
+                >
+                  <span style={{ fontSize: '18px' }}>🔗</span>
+                  Connect Gemini Account
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                  <span style={{ fontSize: '20px' }}>✅</span>
+                  <span style={{ fontSize: '15px', fontWeight: 'bold' }}>Connected Successfully</span>
+                </div>
+                <p style={{ margin: 0, fontSize: '13px', opacity: 0.9, marginBottom: '12px' }}>
+                  Your Gemini account is connected. Viewing real balance.
+                </p>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button
+                    onClick={refreshGeminiBalance}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: 'rgba(255,255,255,0.2)',
+                      color: 'white',
+                      border: '1px solid white',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      transition: 'background-color 0.2s'
+                    }}
+                    onMouseOver={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.3)'}
+                    onMouseOut={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.2)'}
+                  >
+                    🔄 Refresh
+                  </button>
+                  <button
+                    onClick={handleGeminiDisconnect}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: 'rgba(255,255,255,0.2)',
+                      color: 'white',
+                      border: '1px solid white',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      transition: 'background-color 0.2s'
+                    }}
+                    onMouseOver={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.3)'}
+                    onMouseOut={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.2)'}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {isGeminiConnected && geminiBalance && (
+            <div
+              style={{
+                backgroundColor: 'rgba(255,255,255,0.15)',
+                padding: '15px 20px',
+                borderRadius: '10px',
+                minWidth: '220px',
+                backdropFilter: 'blur(10px)'
+              }}
+            >
+              <div style={{ fontSize: '13px', marginBottom: '8px', opacity: 0.9 }}>Account Balance</div>
+              <div style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>
+                ${geminiBalance.totalUsd.toLocaleString()}
+              </div>
+              <div style={{ fontSize: '12px', opacity: 0.85, display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                <div>BTC: {geminiBalance.btc}</div>
+                <div>ETH: {geminiBalance.eth}</div>
+                <div>SOL: {geminiBalance.sol}</div>
+                <div>USDC: ${geminiBalance.usdc.toLocaleString()}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ✅ NEW: OAuth-like Modal for Gemini Connection */}
+      {showGeminiModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 9999,
+            backdropFilter: 'blur(4px)'
+          }}
+          onClick={handleCloseGeminiModal}
+        >
+          <div
+            style={{
+              backgroundColor: 'white',
+              borderRadius: '16px',
+              padding: '30px',
+              maxWidth: '520px',
+              width: '90%',
+              boxShadow: '0 10px 40px rgba(0,0,0,0.3)',
+              position: 'relative'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Close button */}
+            <button
+              onClick={handleCloseGeminiModal}
+              style={{
+                position: 'absolute',
+                top: '15px',
+                right: '15px',
+                background: 'none',
+                border: 'none',
+                fontSize: '24px',
+                cursor: 'pointer',
+                color: '#999',
+                lineHeight: 1
+              }}
+            >
+              ×
+            </button>
+
+            {/* Header */}
+            <div style={{ textAlign: 'center', marginBottom: '25px' }}>
+              <div style={{ fontSize: '48px', marginBottom: '10px' }}>💎</div>
+              <h2 style={{ margin: 0, marginBottom: '8px', color: '#333' }}>Connect to Gemini</h2>
+              <p style={{ margin: 0, fontSize: '14px', color: '#666' }}>
+                View your real Gemini balance
+              </p>
+            </div>
+
+            {/* Step indicator */}
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginBottom: '25px' }}>
+              {[1, 2, 3].map((step) => (
+                <div
+                  key={step}
+                  style={{
+                    width: '30px',
+                    height: '30px',
+                    borderRadius: '50%',
+                    backgroundColor: geminiStep >= step ? '#667eea' : '#e0e0e0',
+                    color: 'white',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '14px',
+                    transition: 'all 0.3s'
+                  }}
+                >
+                  {geminiStep > step ? '✓' : step}
+                </div>
+              ))}
+            </div>
+
+            {/* Step 1: Instructions */}
+            {geminiStep === 1 && (
+              <div>
+                <h3 style={{ fontSize: '16px', marginBottom: '15px', color: '#333' }}>
+                  Step 1: Get Your API Credentials
+                </h3>
+                <ol style={{ paddingLeft: '20px', fontSize: '14px', color: '#555', lineHeight: '1.8' }}>
+                  <li>Click the button below to open Gemini in a new tab</li>
+                  <li>Login to your Gemini account</li>
+                  <li>Go to <strong>Settings → API</strong></li>
+                  <li>Create a new API key with <strong>Read-Only</strong> permissions</li>
+                  <li>Copy both the <strong>API Key</strong> and <strong>Secret</strong></li>
+                </ol>
+                <button
+                  onClick={handleOpenGeminiSite}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    backgroundColor: '#667eea',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontSize: '15px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    marginTop: '15px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px'
+                  }}
+                >
+                  <span>🔗</span>
+                  Open Gemini API Settings
+                </button>
+              </div>
+            )}
+
+            {/* Step 2: Enter credentials */}
+            {geminiStep === 2 && (
+              <div>
+                <h3 style={{ fontSize: '16px', marginBottom: '15px', color: '#333' }}>
+                  Step 2: Enter Your Credentials
+                </h3>
+                <div style={{ marginBottom: '15px' }}>
+                  <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', fontWeight: 'bold', color: '#555' }}>
+                    API Key
+                  </label>
+                  <input
+                    type="text"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value.trim())}
+                    placeholder="Enter your Gemini API Key"
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      border: '2px solid #e0e0e0',
+                      borderRadius: '6px',
+                      fontSize: '14px',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+                <div style={{ marginBottom: '15px' }}>
+                  <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', fontWeight: 'bold', color: '#555' }}>
+                    API Secret
+                  </label>
+                  <input
+                    type="password"
+                    value={geminiApiSecret}
+                    onChange={(e) => setGeminiApiSecret(e.target.value.trim())}
+                    placeholder="Enter your Gemini API Secret"
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      border: '2px solid #e0e0e0',
+                      borderRadius: '6px',
+                      fontSize: '14px',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+
+                {geminiError && (
+                  <div style={{
+                    padding: '10px',
+                    backgroundColor: '#ffebee',
+                    color: '#c62828',
+                    borderRadius: '6px',
+                    fontSize: '13px',
+                    marginBottom: '15px'
+                  }}>
+                    {geminiError}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleGeminiAuthorize}
+                  disabled={isGeminiConnecting}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    backgroundColor: isGeminiConnecting ? '#b0b0b0' : '#4caf50',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontSize: '15px',
+                    fontWeight: 'bold',
+                    cursor: isGeminiConnecting ? 'wait' : 'pointer'
+                  }}
+                >
+                  {isGeminiConnecting ? 'Authorizing...' : 'Authorize Connection'}
+                </button>
+              </div>
+            )}
+
+            {/* Step 3: Connecting */}
+            {geminiStep === 3 && (
+              <div style={{ textAlign: 'center', padding: '30px 0' }}>
+                <div style={{ fontSize: '48px', marginBottom: '15px' }}>🔄</div>
+                <h3 style={{ fontSize: '18px', marginBottom: '10px', color: '#333' }}>
+                  Connecting to Gemini...
+                </h3>
+                <p style={{ fontSize: '14px', color: '#666' }}>
+                  Please wait while we fetch your balance
+                </p>
+              </div>
+            )}
+
+            {/* Security notice */}
+            <div style={{
+              marginTop: '20px',
+              padding: '12px',
+              backgroundColor: '#f5f5f5',
+              borderRadius: '8px',
+              fontSize: '11px',
+              color: '#666',
+              lineHeight: '1.5'
+            }}>
+              🔒 <strong>Security Note:</strong> Your credentials are stored in your browser only.
+              Use read-only API keys for maximum security.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Debug Info Panel */}
       <div
@@ -392,7 +1129,7 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* MODEL SELECTION (clickable cards) */}
+      {/* MODEL SELECTION */}
       {availableModels.length > 0 && (
         <div
           style={{
@@ -414,10 +1151,8 @@ function Dashboard() {
               const isSelected = selectedModels.includes(modelId);
               const color = model.color || '#1976d2';
 
-              // Show live value (normalized if trading, actual if not)
               const currentValue = getNormalizedValue(modelId);
 
-              // Calculate P&L if trading
               let pnl = 0;
               let pnlPercent = 0;
               if (isTrading && initialValues[modelId]) {
@@ -447,7 +1182,6 @@ function Dashboard() {
                     gap: '6px'
                   }}
                 >
-                  {/* Top row: checkmark + name */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <div
                       style={{
@@ -472,18 +1206,10 @@ function Dashboard() {
                     </div>
                   </div>
 
-                  {/* Current live value */}
-                  <div
-                    style={{
-                      fontSize: '20px',
-                      fontWeight: 'bold',
-                      color
-                    }}
-                  >
+                  <div style={{ fontSize: '20px', fontWeight: 'bold', color }}>
                     ${currentValue.toLocaleString()}
                   </div>
 
-                  {/* P&L when trading */}
                   {isTrading && initialValues[modelId] != null && (
                     <div
                       style={{
@@ -496,15 +1222,8 @@ function Dashboard() {
                     </div>
                   )}
 
-                  {/* Show "Live" indicator when not trading */}
                   {!isTrading && (
-                    <div
-                      style={{
-                        fontSize: '11px',
-                        color: '#4CAF50',
-                        fontWeight: 'bold'
-                      }}
-                    >
+                    <div style={{ fontSize: '11px', color: '#4CAF50', fontWeight: 'bold' }}>
                       🔴 LIVE
                     </div>
                   )}
@@ -731,11 +1450,9 @@ function Dashboard() {
                 borderRadius: '4px'
               }}
             >
-              {/* Header with Total Profit/Loss */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
                 <strong>Monitoring Models (All started at ${startValue.toLocaleString()}):</strong>
 
-                {/* Total Profit Display */}
                 {(() => {
                   const totalProfit = selectedModels.reduce((sum, modelId) => {
                     const currentValue = getNormalizedValue(modelId);
@@ -770,7 +1487,6 @@ function Dashboard() {
                 })()}
               </div>
 
-              {/* Individual Model Cards */}
               <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                 {selectedModels.map(modelId => {
                   const model = modelsLatest[modelId];
@@ -829,7 +1545,7 @@ function Dashboard() {
           )}
         </div>
 
-        {/* Other Models Overview - Now shows Total P/L */}
+        {/* Other Models Overview */}
         {availableModels.length > 0 && (
           <div
             style={{
@@ -849,7 +1565,6 @@ function Dashboard() {
               )}
             </h3>
 
-            {/* Total P/L for Other Models */}
             {isTrading && nonSelectedModels.length > 0 && (
               <div
                 style={{
@@ -905,7 +1620,6 @@ function Dashboard() {
                   const modelId = model.id || model.name || `model_${idx}`;
                   const currentValue = getNormalizedValue(modelId);
 
-                  // Calculate P&L for non-selected models too
                   let pnl = 0;
                   let pnlPercent = '0.00';
                   if (isTrading && initialValues[modelId] != null) {
@@ -933,7 +1647,6 @@ function Dashboard() {
                         Value: <strong>${currentValue.toLocaleString()}</strong>
                       </div>
 
-                      {/* Show P&L for non-selected models when trading */}
                       {isTrading && initialValues[modelId] != null && (
                         <div style={{ fontSize: '12px', marginTop: '4px', color: pnl >= 0 ? '#2e7d32' : '#c62828', fontWeight: 'bold' }}>
                           {pnl >= 0 ? '▲' : '▼'} ${Math.abs(pnl).toLocaleString()} ({pnlPercent}%)
@@ -951,12 +1664,101 @@ function Dashboard() {
       {/* Charts */}
       <div className="charts-container">
         <LiveMultiChart history={cryptoHistory} symbols={['BTCUSDT', 'ETHUSDT', 'SOLUSDT']} />
-        <ModelsComparisonChart 
-          modelsHistory={modelsHistory} 
+        <ModelsComparisonChart
+          modelsHistory={modelsHistory}
           selectedModels={selectedModels}
           startingValue={startValue}
           initialValues={initialValues}
         />
+      </div>
+
+      {/* ✅ NEW: Last 20 Transactions Table */}
+      <div
+        style={{
+          background: '#ffffff',
+          padding: '20px',
+          borderRadius: '8px',
+          marginTop: '20px',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }}
+      >
+        <h2 style={{ marginTop: 0, marginBottom: '15px' }}>📊 Last 20 Transactions</h2>
+
+        {loadingTrades ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+            Loading transactions...
+          </div>
+        ) : trades.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
+            No transactions yet. Trades will appear here automatically.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '14px'
+              }}
+            >
+              <thead>
+                <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
+                  <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
+                  <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Model</th>
+                  <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Action</th>
+                  <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Crypto</th>
+                  <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
+                  <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Quantity</th>
+                  <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Total Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.map((trade, index) => (
+                  <tr
+                    key={trade.id || index}
+                    style={{
+                      borderBottom: '1px solid #eee',
+                      transition: 'background-color 0.2s'
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#f9f9f9'}
+                    onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <td style={{ padding: '12px', color: '#666' }}>
+                      {formatTimestamp(trade.timestamp)}
+                    </td>
+                    <td style={{ padding: '12px', fontWeight: 'bold' }}>
+                      {trade.model_name}
+                    </td>
+                    <td style={{ padding: '12px', textAlign: 'center' }}>
+                      <span
+                        style={{
+                          padding: '4px 12px',
+                          borderRadius: '4px',
+                          fontWeight: 'bold',
+                          fontSize: '12px',
+                          backgroundColor: trade.action === 'BUY' ? '#e8f5e9' : '#ffebee',
+                          color: trade.action === 'BUY' ? '#2e7d32' : '#c62828'
+                        }}
+                      >
+                        {trade.action}
+                      </span>
+                    </td>
+                    <td style={{ padding: '12px' }}>{trade.crypto_symbol}</td>
+                    <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                      ${parseFloat(trade.crypto_price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                    <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                      {parseFloat(trade.quantity).toFixed(4)}
+                    </td>
+                    <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                      ${parseFloat(trade.total_value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
