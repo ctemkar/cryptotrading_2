@@ -58,6 +58,37 @@ async function initDatabase() {
 }
 
 /* ------------------------------
+   GEMINI API HELPER FUNCTIONS
+--------------------------------*/
+async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
+  const url = "https://api.gemini.com" + path;
+  const nonce = Date.now().toString();
+  
+  const requestPayload = {
+    request: path,
+    nonce,
+    ...payload
+  };
+
+  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
+  const signature = crypto
+    .createHmac("sha384", apiSecret)
+    .update(encodedPayload)
+    .digest("hex");
+
+  const headers = {
+    "Content-Type": "text/plain",
+    "X-GEMINI-APIKEY": apiKey,
+    "X-GEMINI-PAYLOAD": encodedPayload,
+    "X-GEMINI-SIGNATURE": signature,
+    "Cache-Control": "no-cache"
+  };
+
+  const response = await axios.post(url, {}, { headers, timeout: 10000 });
+  return response.data;
+}
+
+/* ------------------------------
    MODELS INITIAL STATE
 --------------------------------*/
 const MODELS = [
@@ -309,41 +340,11 @@ app.post("/api/gemini/balances", async (req, res) => {
       });
     }
 
-    // Gemini API endpoint for account balances
-    const url = "https://api.gemini.com/v1/balances";
-    const nonce = Date.now().toString();
+    console.log("🔗 Connecting to Gemini API for balances...");
     
-    // Create payload
-    const payload = {
-      request: "/v1/balances",
-      nonce: nonce
-    };
+    // Call Gemini API
+    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
 
-    // Encode payload
-    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64");
-
-    // Create signature
-    const signature = crypto
-      .createHmac("sha384", apiSecret)
-      .update(encodedPayload)
-      .digest("hex");
-
-    // Make request to Gemini API
-    console.log("🔗 Connecting to Gemini API...");
-    
-    const response = await axios.post(url, {}, {
-      headers: {
-        "Content-Type": "text/plain",
-        "X-GEMINI-APIKEY": apiKey,
-        "X-GEMINI-PAYLOAD": encodedPayload,
-        "X-GEMINI-SIGNATURE": signature,
-        "Cache-Control": "no-cache"
-      },
-      timeout: 10000 // 10 second timeout
-    });
-
-    // Process balances
-    const balances = response.data;
     console.log("✅ Gemini API response received");
 
     // Calculate total USD value and organize balances
@@ -409,7 +410,6 @@ app.post("/api/gemini/balances", async (req, res) => {
     
     // Handle specific error cases
     if (error.response) {
-      // Gemini API returned an error
       const status = error.response.status;
       const data = error.response.data;
       
@@ -438,6 +438,144 @@ app.post("/api/gemini/balances", async (req, res) => {
       return res.status(500).json({
         success: false,
         error: "Failed to connect to Gemini. Please try again later."
+      });
+    }
+  }
+});
+
+/* ----------------------------------------
+   API ENDPOINT: GET GEMINI MARKET TRADES
+-----------------------------------------*/
+app.get("/api/gemini/market-trades", async (req, res) => {
+  try {
+    const { symbol = 'btcusd', limit = 20 } = req.query;
+
+    console.log(`🔗 Fetching market trades for ${symbol}...`);
+
+    // Public endpoint - no authentication required
+    const response = await axios.get(
+      `https://api.gemini.com/v1/trades/${symbol}`,
+      {
+        params: { limit_trades: limit },
+        timeout: 10000
+      }
+    );
+
+    console.log(`✅ Fetched ${response.data.length} market trades`);
+
+    res.json({
+      success: true,
+      trades: response.data,
+      symbol
+    });
+
+  } catch (error) {
+    console.error("❌ Error fetching market trades:", error.message);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch market trades"
+    });
+  }
+});
+
+/* ----------------------------------------
+   API ENDPOINT: PLACE GEMINI ORDER
+-----------------------------------------*/
+app.post("/api/gemini/order", async (req, res) => {
+  try {
+    const { apiKey, apiSecret, symbol, side, amount, price, type = 'exchange limit' } = req.body;
+
+    // Validate input
+    if (!apiKey || !apiSecret) {
+      return res.status(400).json({
+        success: false,
+        error: "API Key and API Secret are required"
+      });
+    }
+
+    if (!symbol || !side || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: "Symbol, side (buy/sell), and amount are required"
+      });
+    }
+
+    // Validate side
+    if (side !== 'buy' && side !== 'sell') {
+      return res.status(400).json({
+        success: false,
+        error: "Side must be 'buy' or 'sell'"
+      });
+    }
+
+    // Validate amount
+    const amountNum = parseFloat(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Amount must be a positive number"
+      });
+    }
+
+    // Validate price for limit orders
+    if (type.includes('limit')) {
+      const priceNum = parseFloat(price);
+      if (!price || isNaN(priceNum) || priceNum <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Price is required for limit orders and must be a positive number"
+        });
+      }
+    }
+
+    console.log(`🔗 Placing ${side} order: ${amount} ${symbol} @ $${price}...`);
+
+    // Prepare order payload
+    const orderPayload = {
+      symbol: symbol.toLowerCase(),
+      amount: amount.toString(),
+      price: price.toString(),
+      side: side.toLowerCase(),
+      type: type,
+      options: ['maker-or-cancel'] // Prevents immediate execution, safer for testing
+    };
+
+    // Call Gemini API to place order
+    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", orderPayload);
+
+    console.log("✅ Order placed successfully:", order.order_id);
+
+    res.json({
+      success: true,
+      order: {
+        order_id: order.order_id,
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        price: order.price,
+        amount: order.original_amount,
+        remaining: order.remaining_amount,
+        executed: order.executed_amount,
+        timestamp: order.timestamp
+      },
+      message: "Order placed successfully"
+    });
+
+  } catch (error) {
+    console.error("❌ Error placing order:", error.message);
+    
+    if (error.response) {
+      const status = error.response.status;
+      const data = error.response.data;
+      
+      return res.status(status).json({
+        success: false,
+        error: data.message || "Failed to place order"
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: error.message || "Failed to place order"
       });
     }
   }
@@ -495,6 +633,7 @@ async function startServer() {
     console.log("🚀 Backend running on port 3001");
     console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
     console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
+    console.log("💎 Gemini API endpoints ready");
   });
 }
 

@@ -3,38 +3,59 @@ import LiveMultiChart from './LiveMultiChart';
 import ModelsComparisonChart from './ModelsComparisonChart';
 import useModels from '../hooks/useModels';
 import useCryptoPrices from '../hooks/useCryptoPrices';
+import { useGemini } from '../hooks/useGemini';
 import socket from '../services/socket';
 
 function Dashboard() {
-  // ✅ NEW: Google Login State
+  // ✅ Google Login State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userInfo, setUserInfo] = useState(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
 
-  // ✅ NEW: Trades State
+  // ✅ Trades State
   const [trades, setTrades] = useState([]);
   const [loadingTrades, setLoadingTrades] = useState(true);
 
-  // ✅ NEW: Gemini OAuth-like connection state
+  // ✅ useGemini hook for enhanced Gemini integration
+  const {
+    balances: geminiBalances,
+    marketTrades: geminiMarketTrades,
+    loading: geminiLoading,
+    error: geminiError,
+    isConnected: isGeminiConnected,
+    connect: connectGemini,
+    disconnect: disconnectGemini,
+    fetchBalances: refreshGeminiBalances,
+    fetchMarketTrades: refreshGeminiMarketTrades,
+    placeOrder: placeGeminiOrder,
+    setError: setGeminiError
+  } = useGemini();
+
+  // ✅ Manual trading state
+  const [showTradeModal, setShowTradeModal] = useState(false);
+  const [tradeSymbol, setTradeSymbol] = useState('btcusd');
+  const [tradeSide, setTradeSide] = useState('buy');
+  const [tradeAmount, setTradeAmount] = useState('');
+  const [tradePrice, setTradePrice] = useState('');
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+
+  // ✅ Gemini modal state
   const [showGeminiModal, setShowGeminiModal] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
   const [geminiApiSecret, setGeminiApiSecret] = useState(() => localStorage.getItem('geminiApiSecret') || '');
-  const [isGeminiConnected, setIsGeminiConnected] = useState(() => {
-    const saved = localStorage.getItem('isGeminiConnected');
-    return saved === 'true';
-  });
-  const [geminiBalance, setGeminiBalance] = useState(() => {
-    const saved = localStorage.getItem('geminiBalance');
-    return saved ? JSON.parse(saved) : null;
-  });
   const [isGeminiConnecting, setIsGeminiConnecting] = useState(false);
-  const [geminiError, setGeminiError] = useState('');
   const [geminiStep, setGeminiStep] = useState(1);
 
-  // ✅ NEW: Track the last user-set starting value separately
+  // ✅ Mock trading state
+  const [isMockTrading, setIsMockTrading] = useState(() => {
+    const saved = localStorage.getItem('isMockTrading');
+    return saved === null ? true : saved === 'true'; // Default to true (mock mode)
+  });
+
+  // ✅ Track the last user-set starting value separately
   const [lastSetStartingValue, setLastSetStartingValue] = useState(() => {
     const saved = localStorage.getItem('lastSetStartingValue');
-    return saved || '1000'; // Default to 1000 on first load
+    return saved || '1000';
   });
 
   // Load saved values from localStorage or use defaults
@@ -42,7 +63,7 @@ function Dashboard() {
   const [profitTarget, setProfitTarget] = useState(() => localStorage.getItem('profitTarget') || '');
   const [startingValue, setStartingValue] = useState(() => {
     const saved = localStorage.getItem('startingValue');
-    return saved || '1000'; // Default to 1000 on first load
+    return saved || '1000';
   });
   const [isTrading, setIsTrading] = useState(() => {
     const saved = localStorage.getItem('isTrading');
@@ -50,6 +71,7 @@ function Dashboard() {
   });
   const [tradingStopped, setTradingStopped] = useState(false);
   const [stopReason, setStopReason] = useState('');
+  const [finalProfitLoss, setFinalProfitLoss] = useState(null);
   const [selectedModels, setSelectedModels] = useState(() => {
     const saved = localStorage.getItem('selectedModels');
     return saved ? JSON.parse(saved) : [];
@@ -77,8 +99,8 @@ function Dashboard() {
     { label: 'Very Slow (5s)', value: '5000' }
   ];
 
-  // ✅ NEW: Fetch trades from backend
-  const fetchTrades = async () => {
+  // ✅ Fetch trades from backend
+  /*const fetchTrades = async () => {
     try {
       const response = await fetch('http://localhost:3001/api/trades');
       const data = await response.json();
@@ -88,17 +110,27 @@ function Dashboard() {
       console.error('Error fetching trades:', error);
       setLoadingTrades(false);
     }
+  };*/
+
+  const fetchTrades = async () => {
+    try {
+      const response = await fetch('/api/trades');
+      const data = await response.json();
+      setTrades(data);
+      setLoadingTrades(false);
+    } catch (error) {
+      console.error('Error fetching trades:', error);
+      setLoadingTrades(false);
+    }
   };
 
-  // ✅ NEW: Listen for real-time trade updates
+  // ✅ Listen for real-time trade updates
   useEffect(() => {
-    // Fetch initial trades
     fetchTrades();
 
-    // Listen for new trades via Socket.io
     socket.on('new_trade', (trade) => {
       console.log('📊 New trade received:', trade);
-      setTrades((prev) => [trade, ...prev].slice(0, 20)); // Keep only last 20
+      setTrades((prev) => [trade, ...prev].slice(0, 20));
     });
 
     return () => {
@@ -106,9 +138,8 @@ function Dashboard() {
     };
   }, []);
 
-  // ✅ NEW: Initialize Google Sign-In
+  // ✅ Initialize Google Sign-In
   useEffect(() => {
-    // Load Google Identity Services script
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
@@ -116,7 +147,6 @@ function Dashboard() {
     document.body.appendChild(script);
 
     script.onload = () => {
-      // Check if user was previously logged in
       const savedUser = localStorage.getItem('googleUser');
       if (savedUser) {
         try {
@@ -129,7 +159,6 @@ function Dashboard() {
       }
       setIsLoadingAuth(false);
 
-      // Initialize Google Sign-In
       if (window.google) {
         window.google.accounts.id.initialize({
           client_id: '157143841270-n05ehn5d303vaije4bgg8gp3392l64ve.apps.googleusercontent.com',
@@ -143,10 +172,9 @@ function Dashboard() {
     };
   }, []);
 
-  // ✅ NEW: Handle Google Sign-In callback
+  // ✅ Handle Google Sign-In callback
   const handleGoogleCallback = (response) => {
     try {
-      // Decode JWT token to get user info
       const payload = JSON.parse(atob(response.credential.split('.')[1]));
       const user = {
         email: payload.email,
@@ -165,7 +193,7 @@ function Dashboard() {
     }
   };
 
-  // ✅ NEW: Render Google Sign-In button
+  // ✅ Render Google Sign-In button
   const renderGoogleButton = () => {
     if (window.google) {
       window.google.accounts.id.renderButton(
@@ -181,20 +209,19 @@ function Dashboard() {
     }
   };
 
-  // ✅ NEW: Trigger button render after auth check
+  // ✅ Trigger button render after auth check
   useEffect(() => {
     if (!isLoadingAuth && !isAuthenticated) {
       setTimeout(renderGoogleButton, 100);
     }
   }, [isLoadingAuth, isAuthenticated]);
 
-  // ✅ NEW: Handle Logout
+  // ✅ Handle Logout
   const handleLogout = () => {
     setIsAuthenticated(false);
     setUserInfo(null);
     localStorage.removeItem('googleUser');
 
-    // Also clear trading data on logout
     setIsTrading(false);
     setTradingStopped(false);
     setStopReason('');
@@ -204,7 +231,7 @@ function Dashboard() {
     console.log('✅ User logged out');
   };
 
-  // ✅ NEW: Persist Gemini connection
+  // ✅ Persist Gemini connection
   useEffect(() => {
     if (geminiApiKey) localStorage.setItem('geminiApiKey', geminiApiKey);
     else localStorage.removeItem('geminiApiKey');
@@ -215,57 +242,34 @@ function Dashboard() {
     else localStorage.removeItem('geminiApiSecret');
   }, [geminiApiSecret]);
 
+  // ✅ Persist mock trading state
   useEffect(() => {
-    localStorage.setItem('isGeminiConnected', isGeminiConnected.toString());
+    localStorage.setItem('isMockTrading', isMockTrading.toString());
+  }, [isMockTrading]);
+
+  // ✅ Stop mock trading when Gemini connects
+  useEffect(() => {
+    if (isGeminiConnected) {
+      setIsMockTrading(false);
+      if (isTrading) {
+        setIsTrading(false);
+        setTradingStopped(true);
+        setStopReason('Switched to Gemini live trading. Mock trading stopped.');
+      }
+      console.log('✅ Mock trading disabled - Gemini connected');
+    }
   }, [isGeminiConnected]);
 
-  useEffect(() => {
-    if (geminiBalance) localStorage.setItem('geminiBalance', JSON.stringify(geminiBalance));
-    else localStorage.removeItem('geminiBalance');
-  }, [geminiBalance]);
-
-  // ✅ NEW: Fetch Gemini balance on mount if already connected
-  useEffect(() => {
-    if (isGeminiConnected && geminiApiKey && geminiApiSecret) {
-      // Refresh balance on mount
-      refreshGeminiBalance();
-    }
-  }, []);
-
-  // ✅ NEW: Function to refresh Gemini balance
-  const refreshGeminiBalance = async () => {
-    if (!geminiApiKey || !geminiApiSecret) return;
-
-    try {
-      const response = await fetch('http://localhost:3001/api/gemini/balances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: geminiApiKey,
-          apiSecret: geminiApiSecret
-        })
-      });
-
-      const data = await response.json();
-
-      if (response.ok && data.success) {
-        setGeminiBalance(data.balance);
-      }
-    } catch (error) {
-      console.error('Error refreshing Gemini balance:', error);
-    }
-  };
-
-  // ✅ NEW: OAuth-like Gemini connection handlers
+  // ✅ OAuth-like Gemini connection handlers
   const handleOpenGeminiModal = () => {
     setShowGeminiModal(true);
     setGeminiStep(1);
-    setGeminiError('');
+    setGeminiError(null);
   };
 
   const handleCloseGeminiModal = () => {
     setShowGeminiModal(false);
-    setGeminiError('');
+    setGeminiError(null);
   };
 
   const handleGeminiAuthorize = async () => {
@@ -281,27 +285,15 @@ function Dashboard() {
 
     try {
       setIsGeminiConnecting(true);
-      setGeminiError('');
+      setGeminiError(null);
       setGeminiStep(3);
 
-      // Call backend API to verify credentials and fetch real balance
-      const response = await fetch('http://localhost:3001/api/gemini/balances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: geminiApiKey,
-          apiSecret: geminiApiSecret
-        })
-      });
+      // Use the connectGemini function from useGemini hook
+      const result = await connectGemini(geminiApiKey, geminiApiSecret);
 
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Failed to connect to Gemini');
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to connect to Gemini');
       }
-
-      setGeminiBalance(data.balance);
-      setIsGeminiConnected(true);
 
       // Close modal after success
       setTimeout(() => {
@@ -312,8 +304,6 @@ function Dashboard() {
     } catch (error) {
       console.error('Gemini authorization failed:', error);
       setGeminiError(error.message || 'Authorization failed. Please try again.');
-      setIsGeminiConnected(false);
-      setGeminiBalance(null);
       setGeminiStep(2);
     } finally {
       setIsGeminiConnecting(false);
@@ -324,12 +314,10 @@ function Dashboard() {
     if (window.confirm('Are you sure you want to disconnect your Gemini account?')) {
       setGeminiApiKey('');
       setGeminiApiSecret('');
-      setIsGeminiConnected(false);
-      setGeminiBalance(null);
+      disconnectGemini();
       localStorage.removeItem('geminiApiKey');
       localStorage.removeItem('geminiApiSecret');
-      localStorage.removeItem('isGeminiConnected');
-      localStorage.removeItem('geminiBalance');
+      setIsMockTrading(true); // Re-enable mock trading
     }
   };
 
@@ -338,7 +326,7 @@ function Dashboard() {
     setGeminiStep(2);
   };
 
-  // ✅ ONE-TIME MIGRATION: Reset old 10000 values to 1000 for all users
+  // ✅ ONE-TIME MIGRATION
   useEffect(() => {
     const currentStart = localStorage.getItem('startingValue');
     const currentLast = localStorage.getItem('lastSetStartingValue');
@@ -443,12 +431,18 @@ function Dashboard() {
     }
   }, [updateSpeed, socketConnected]);
 
-  // Monitor model values when trading is active
+  // ✅ Monitor model values when trading is active (with P/L capture)
   useEffect(() => {
     if (!isTrading || selectedModels.length === 0) return;
 
     const stopLossValue = parseFloat(stopLoss);
     const profitTargetValue = parseFloat(profitTarget);
+
+    // Calculate total current P/L
+    const totalProfit = selectedModels.reduce((sum, modelId) => {
+      const currentValue = getNormalizedValue(modelId);
+      return sum + (currentValue - startValue);
+    }, 0);
 
     selectedModels.forEach(modelId => {
       const model = modelsLatest[modelId];
@@ -459,6 +453,7 @@ function Dashboard() {
       if (stopLossValue && normalizedValue <= stopLossValue) {
         setIsTrading(false);
         setTradingStopped(true);
+        setFinalProfitLoss(totalProfit);
         setStopReason(
           `Stop Loss Hit! ${model.name || modelId} value fell to $${normalizedValue}`
         );
@@ -467,6 +462,7 @@ function Dashboard() {
       if (profitTargetValue && normalizedValue >= profitTargetValue) {
         setIsTrading(false);
         setTradingStopped(true);
+        setFinalProfitLoss(totalProfit);
         setStopReason(
           `Profit Target Hit! ${model.name || modelId} value reached $${normalizedValue}`
         );
@@ -550,11 +546,19 @@ function Dashboard() {
     setIsTrading(true);
     setTradingStopped(false);
     setStopReason('');
+    setFinalProfitLoss(null);
   };
 
   const handleStopTrading = () => {
+    // Calculate final P/L before stopping
+    const totalProfit = selectedModels.reduce((sum, modelId) => {
+      const currentValue = getNormalizedValue(modelId);
+      return sum + (currentValue - startValue);
+    }, 0);
+
     setIsTrading(false);
     setTradingStopped(true);
+    setFinalProfitLoss(totalProfit);
     setStopReason('Trading stopped manually');
   };
 
@@ -562,6 +566,7 @@ function Dashboard() {
     setIsTrading(false);
     setTradingStopped(false);
     setStopReason('');
+    setFinalProfitLoss(null);
     setStopLoss('');
     setProfitTarget('');
     setStartingValue(lastSetStartingValue);
@@ -581,7 +586,7 @@ function Dashboard() {
     return !selectedModels.includes(modelId);
   });
 
-  // ✅ NEW: Format timestamp for trades table
+  // ✅ Format timestamp for trades table
   const formatTimestamp = (timestamp) => {
     const date = new Date(timestamp);
     return date.toLocaleString('en-US', {
@@ -701,7 +706,7 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* ✅ NEW: Gemini OAuth-like Connection Panel */}
+      {/* ✅ Gemini Connection Panel */}
       <div
         style={{
           background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
@@ -722,7 +727,7 @@ function Dashboard() {
             {!isGeminiConnected ? (
               <>
                 <p style={{ margin: 0, fontSize: '14px', opacity: 0.9, marginBottom: '12px' }}>
-                  Connect your Gemini account to view your real balance
+                  Connect your Gemini account to view your real balance and place trades
                 </p>
                 <button
                   onClick={handleOpenGeminiModal}
@@ -759,7 +764,7 @@ function Dashboard() {
                 </p>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <button
-                    onClick={refreshGeminiBalance}
+                    onClick={() => refreshGeminiBalances()}
                     style={{
                       padding: '8px 16px',
                       backgroundColor: 'rgba(255,255,255,0.2)',
@@ -799,7 +804,7 @@ function Dashboard() {
             )}
           </div>
 
-          {isGeminiConnected && geminiBalance && (
+          {isGeminiConnected && geminiBalances && (
             <div
               style={{
                 backgroundColor: 'rgba(255,255,255,0.15)',
@@ -811,20 +816,20 @@ function Dashboard() {
             >
               <div style={{ fontSize: '13px', marginBottom: '8px', opacity: 0.9 }}>Account Balance</div>
               <div style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>
-                ${geminiBalance.totalUsd.toLocaleString()}
+                ${geminiBalances.totalUsd?.toLocaleString() || '0'}
               </div>
               <div style={{ fontSize: '12px', opacity: 0.85, display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                <div>BTC: {geminiBalance.btc}</div>
-                <div>ETH: {geminiBalance.eth}</div>
-                <div>SOL: {geminiBalance.sol}</div>
-                <div>USDC: ${geminiBalance.usdc.toLocaleString()}</div>
+                <div>BTC: {geminiBalances.btc || '0'}</div>
+                <div>ETH: {geminiBalances.eth || '0'}</div>
+                <div>SOL: {geminiBalances.sol || '0'}</div>
+                <div>USDC: ${geminiBalances.usdc?.toLocaleString() || '0'}</div>
               </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* ✅ NEW: OAuth-like Modal for Gemini Connection */}
+      {/* ✅ Gemini Connection Modal */}
       {showGeminiModal && (
         <div
           style={{
@@ -854,7 +859,6 @@ function Dashboard() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Close button */}
             <button
               onClick={handleCloseGeminiModal}
               style={{
@@ -872,16 +876,14 @@ function Dashboard() {
               ×
             </button>
 
-            {/* Header */}
             <div style={{ textAlign: 'center', marginBottom: '25px' }}>
               <div style={{ fontSize: '48px', marginBottom: '10px' }}>💎</div>
               <h2 style={{ margin: 0, marginBottom: '8px', color: '#333' }}>Connect to Gemini</h2>
               <p style={{ margin: 0, fontSize: '14px', color: '#666' }}>
-                View your real Gemini balance
+                View your real Gemini balance and place trades
               </p>
             </div>
 
-            {/* Step indicator */}
             <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginBottom: '25px' }}>
               {[1, 2, 3].map((step) => (
                 <div
@@ -905,7 +907,6 @@ function Dashboard() {
               ))}
             </div>
 
-            {/* Step 1: Instructions */}
             {geminiStep === 1 && (
               <div>
                 <h3 style={{ fontSize: '16px', marginBottom: '15px', color: '#333' }}>
@@ -915,7 +916,7 @@ function Dashboard() {
                   <li>Click the button below to open Gemini in a new tab</li>
                   <li>Login to your Gemini account</li>
                   <li>Go to <strong>Settings → API</strong></li>
-                  <li>Create a new API key with <strong>Read-Only</strong> permissions</li>
+                  <li>Create a new API key with <strong>Trading</strong> permissions</li>
                   <li>Copy both the <strong>API Key</strong> and <strong>Secret</strong></li>
                 </ol>
                 <button
@@ -943,7 +944,6 @@ function Dashboard() {
               </div>
             )}
 
-            {/* Step 2: Enter credentials */}
             {geminiStep === 2 && (
               <div>
                 <h3 style={{ fontSize: '16px', marginBottom: '15px', color: '#333' }}>
@@ -1021,7 +1021,6 @@ function Dashboard() {
               </div>
             )}
 
-            {/* Step 3: Connecting */}
             {geminiStep === 3 && (
               <div style={{ textAlign: 'center', padding: '30px 0' }}>
                 <div style={{ fontSize: '48px', marginBottom: '15px' }}>🔄</div>
@@ -1034,7 +1033,6 @@ function Dashboard() {
               </div>
             )}
 
-            {/* Security notice */}
             <div style={{
               marginTop: '20px',
               padding: '12px',
@@ -1045,9 +1043,331 @@ function Dashboard() {
               lineHeight: '1.5'
             }}>
               🔒 <strong>Security Note:</strong> Your credentials are stored in your browser only.
-              Use read-only API keys for maximum security.
+              Use API keys with appropriate permissions for your needs.
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ✅ Manual Trading Modal */}
+      {showTradeModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 9999,
+            backdropFilter: 'blur(4px)'
+          }}
+          onClick={() => setShowTradeModal(false)}
+        >
+          <div
+            style={{
+              backgroundColor: 'white',
+              borderRadius: '16px',
+              padding: '30px',
+              maxWidth: '500px',
+              width: '90%',
+              boxShadow: '0 10px 40px rgba(0,0,0,0.3)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: '20px' }}>Place Manual Order</h2>
+
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold' }}>
+                Symbol
+              </label>
+              <select
+                value={tradeSymbol}
+                onChange={(e) => setTradeSymbol(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  border: '2px solid #e0e0e0',
+                  borderRadius: '6px',
+                  fontSize: '14px'
+                }}
+              >
+                <option value="btcusd">BTC/USD</option>
+                <option value="ethusd">ETH/USD</option>
+                <option value="solusd">SOL/USD</option>
+              </select>
+            </div>
+
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold' }}>
+                Side
+              </label>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  onClick={() => setTradeSide('buy')}
+                  style={{
+                    flex: 1,
+                    padding: '10px',
+                    backgroundColor: tradeSide === 'buy' ? '#4caf50' : '#f5f5f5',
+                    color: tradeSide === 'buy' ? 'white' : '#333',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer'
+                  }}
+                >
+                  BUY
+                </button>
+                <button
+                  onClick={() => setTradeSide('sell')}
+                  style={{
+                    flex: 1,
+                    padding: '10px',
+                    backgroundColor: tradeSide === 'sell' ? '#f44336' : '#f5f5f5',
+                    color: tradeSide === 'sell' ? 'white' : '#333',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer'
+                  }}
+                >
+                  SELL
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold' }}>
+                Amount
+              </label>
+              <input
+                type="number"
+                step="0.0001"
+                value={tradeAmount}
+                onChange={(e) => setTradeAmount(e.target.value)}
+                placeholder="e.g., 0.001"
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  border: '2px solid #e0e0e0',
+                  borderRadius: '6px',
+                  fontSize: '14px'
+                }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold' }}>
+                Price (USD)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                value={tradePrice}
+                onChange={(e) => setTradePrice(e.target.value)}
+                placeholder="e.g., 95000"
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  border: '2px solid #e0e0e0',
+                  borderRadius: '6px',
+                  fontSize: '14px'
+                }}
+              />
+            </div>
+
+            {geminiError && (
+              <div style={{
+                padding: '10px',
+                backgroundColor: '#ffebee',
+                color: '#c62828',
+                borderRadius: '6px',
+                fontSize: '13px',
+                marginBottom: '15px'
+              }}>
+                {geminiError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={async () => {
+                  setIsPlacingOrder(true);
+                  setGeminiError(null);
+                  
+                  const result = await placeGeminiOrder({
+                    symbol: tradeSymbol,
+                    side: tradeSide,
+                    amount: tradeAmount,
+                    price: tradePrice
+                  });
+
+                  setIsPlacingOrder(false);
+
+                  if (result.success) {
+                    alert(`Order placed successfully! Order ID: ${result.data.order_id}`);
+                    setShowTradeModal(false);
+                    setTradeAmount('');
+                    setTradePrice('');
+                    refreshGeminiBalances();
+                    refreshGeminiMarketTrades();
+                  }
+                }}
+                disabled={isPlacingOrder || !tradeAmount || !tradePrice}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  backgroundColor: isPlacingOrder || !tradeAmount || !tradePrice ? '#b0b0b0' : '#4caf50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '15px',
+                  fontWeight: 'bold',
+                  cursor: isPlacingOrder || !tradeAmount || !tradePrice ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {isPlacingOrder ? 'Placing Order...' : 'Place Order'}
+              </button>
+              <button
+                onClick={() => setShowTradeModal(false)}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  backgroundColor: '#f5f5f5',
+                  color: '#333',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '15px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div style={{
+              marginTop: '15px',
+              padding: '10px',
+              backgroundColor: '#fff3e0',
+              borderRadius: '6px',
+              fontSize: '11px',
+              color: '#666'
+            }}>
+              ⚠️ <strong>Warning:</strong> This will place a real order on Gemini with real money. Double-check all values before confirming.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ Last 20 Market Trades from Gemini */}
+      {isGeminiConnected && (
+        <div
+          style={{
+            background: '#ffffff',
+            padding: '20px',
+            borderRadius: '8px',
+            marginBottom: '20px',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => refreshGeminiMarketTrades()}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#667eea',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Refresh
+              </button>
+              <button
+                onClick={() => setShowTradeModal(true)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#4caf50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer'
+                }}
+              >
+                📊 Place Order
+              </button>
+            </div>
+          </div>
+
+          {geminiLoading ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+              Loading market trades...
+            </div>
+          ) : geminiMarketTrades.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
+              No market trades available
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
+                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
+                    <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Type</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Amount</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {geminiMarketTrades.map((trade, index) => (
+                    <tr
+                      key={trade.tid || index}
+                      style={{ borderBottom: '1px solid #eee' }}
+                    >
+                      <td style={{ padding: '12px', color: '#666' }}>
+                        {new Date(trade.timestampms).toLocaleTimeString()}
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'center' }}>
+                        <span
+                          style={{
+                            padding: '4px 12px',
+                            borderRadius: '4px',
+                            fontWeight: 'bold',
+                            fontSize: '12px',
+                            backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
+                            color: trade.type === 'buy' ? '#2e7d32' : '#c62828'
+                          }}
+                        >
+                          {trade.type.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                        ${parseFloat(trade.price).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                        {parseFloat(trade.amount).toFixed(4)}
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                        ${(parseFloat(trade.price) * parseFloat(trade.amount)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -1082,8 +1402,12 @@ function Dashboard() {
             <strong>Update Speed:</strong> {parseInt(updateSpeed) / 1000}s
           </div>
           <div>
+            <strong>Trading Mode:</strong>{' '}
+            {isGeminiConnected ? '💎 Gemini (Live)' : isMockTrading ? '🎮 Mock' : '⚪ Inactive'}
+          </div>
+          <div>
             <strong>Trading Status:</strong>{' '}
-            {isTrading ? '🟢 Active (Persisted)' : '⚪ Inactive'}
+            {isTrading ? '🟢 Active' : '⚪ Inactive'}
           </div>
         </div>
       </div>
@@ -1533,14 +1857,27 @@ function Dashboard() {
             <div
               style={{
                 marginTop: '10px',
-                padding: '10px',
+                padding: '12px',
                 backgroundColor: '#ffebee',
                 borderRadius: '4px',
-                color: '#c62828',
-                fontWeight: 'bold'
+                border: '2px solid #f44336'
               }}
             >
-              {stopReason}
+              <div style={{ color: '#c62828', fontWeight: 'bold', marginBottom: '8px' }}>
+                {stopReason}
+              </div>
+              {finalProfitLoss !== null && (
+                <div
+                  style={{
+                    fontSize: '18px',
+                    fontWeight: 'bold',
+                    color: finalProfitLoss >= 0 ? '#2e7d32' : '#c62828',
+                    marginTop: '8px'
+                  }}
+                >
+                  Final Profit/Loss: {finalProfitLoss >= 0 ? '+' : ''}${finalProfitLoss.toFixed(2)} USD
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1672,7 +2009,7 @@ function Dashboard() {
         />
       </div>
 
-      {/* ✅ NEW: Last 20 Transactions Table */}
+      {/* ✅ Last 20 Transactions Table */}
       <div
         style={{
           background: '#ffffff',
