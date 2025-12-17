@@ -92,13 +92,13 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
    MODELS INITIAL STATE
 --------------------------------*/
 const MODELS = [
-  { id: "gemini-3-pro",      name: "Gemini-3-pro",      color: "#1f77b4", volatility: 0.5 },
-  { id: "qwen-3-max",        name: "Qwen-3-max",        color: "#ff7f0e", volatility: 0.3 },
-  { id: "gpt-5.2",           name: "GPT-5.2",           color: "#2ca02c", volatility: 0.7 },
-  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", color: "#d62728", volatility: 0.4 },
-  { id: "mystery-model",     name: "Mystery Model",     color: "#9467bd", volatility: 1.0 },
-  { id: "deepseek",          name: "DeepSeek",          color: "#8e24aa", volatility: 0.6 },
-  { id: "grok",              name: "Grok",              color: "#ff9800", volatility: 0.7 }
+  { id: "gemini-3-pro",      name: "Gemini-3-pro",            color: "#1f77b4", volatility: 0.5 },
+  { id: "qwen-3-next",        name: "Qwen3-Next",             color: "#ff7f0e", volatility: 0.3 },
+  { id: "gpt-5.2",           name: "GPT-5.2",                 color: "#2ca02c", volatility: 0.7 },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5",       color: "#d62728", volatility: 0.4 },
+  { id: "mystery-model",     name: "Mystery Model",           color: "#9467bd", volatility: 1.0 },
+  { id: "deepseek",          name: "DeepSeek-V3.2-Speciale",  color: "#8e24aa", volatility: 0.6 },
+  { id: "grok",              name: "Grok",                    color: "#ff9800", volatility: 0.7 }
 ];
 
 const STARTING_VALUE = 1000;
@@ -330,6 +330,7 @@ app.get("/api/trades", async (req, res) => {
 -----------------------------------------*/
 app.post("/api/gemini/balances", async (req, res) => {
   try {
+    console.log("📥 Received request body:", req.body);
     const { apiKey, apiSecret } = req.body;
 
     // Validate input

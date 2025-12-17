@@ -100,18 +100,6 @@ function Dashboard() {
   ];
 
   // ✅ Fetch trades from backend
-  /*const fetchTrades = async () => {
-    try {
-      const response = await fetch('http://localhost:3001/api/trades');
-      const data = await response.json();
-      setTrades(data);
-      setLoadingTrades(false);
-    } catch (error) {
-      console.error('Error fetching trades:', error);
-      setLoadingTrades(false);
-    }
-  };*/
-
   const fetchTrades = async () => {
     try {
       const response = await fetch('/api/trades');
@@ -322,7 +310,7 @@ function Dashboard() {
   };
 
   const handleOpenGeminiSite = () => {
-    window.open('https://exchange.gemini.com/settings/api', '_blank');
+    // Just advance to step 2 without opening external site
     setGeminiStep(2);
   };
 
@@ -655,7 +643,7 @@ function Dashboard() {
   }
 
   return (
-    <div className="dashboard">
+    <div className="dashboard" style={{ minHeight: '100vh', paddingBottom: '40px' }}>
       {/* User Info Header with Logout */}
       <div style={{
         display: 'flex',
@@ -704,6 +692,112 @@ function Dashboard() {
             Logout
           </button>
         </div>
+      </div>
+
+      {/* ✅ Trading Summary Panel */}
+      <div
+        style={{
+          background: 'linear-gradient(135deg, #4CAF50 0%, #2e7d32 100%)',
+          padding: '25px',
+          borderRadius: '12px',
+          marginBottom: '20px',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          color: 'white'
+        }}
+      >
+        <h2 style={{ margin: 0, marginBottom: '20px', fontSize: '22px', display: 'flex', alignItems: 'center', gap: '10px', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '28px' }}>📊</span>
+            Trading Summary
+          </span>
+          <span style={{ fontSize: '13px', opacity: 0.9 }}>
+            Selected Models: {selectedModels.length > 0 ? selectedModels.length : 'None'}
+          </span>
+        </h2>
+
+        {/* ✅ Selected Models Display */}
+        {selectedModels.length > 0 && (
+          <div style={{ marginBottom: '15px', padding: '12px', backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '8px', opacity: 0.9 }}>Active Trading Models</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              {selectedModels.map(modelId => {
+                const model = modelsLatest[modelId];
+                return (
+                  <div
+                    key={modelId}
+                    style={{
+                      padding: '6px 12px',
+                      backgroundColor: 'rgba(255,255,255,0.25)',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      fontWeight: 'bold',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <span style={{ fontSize: '16px' }}>🤖</span>
+                    {model?.name || modelId}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px' }}>
+          {/* Total Profit/Loss */}
+          <div style={{ backgroundColor: 'rgba(255,255,255,0.15)', padding: '15px', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Total Profit/Loss</div>
+            <div style={{ fontSize: '22px', fontWeight: 'bold', color: finalProfitLoss !== null && finalProfitLoss >= 0 ? '#a5d6a7' : '#ef9a9a' }}>
+              {finalProfitLoss !== null ? `${finalProfitLoss >= 0 ? '+' : ''}$${finalProfitLoss.toFixed(2)}` : '$0.00'}
+            </div>
+          </div>
+
+          {/* Win Rate */}
+          <div style={{ backgroundColor: 'rgba(255,255,255,0.15)', padding: '15px', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Win Rate</div>
+            <div style={{ fontSize: '22px', fontWeight: 'bold' }}>
+              {(() => {
+                const totalTrades = trades.length;
+                const winningTrades = trades.filter(t => t.profit > 0).length;
+                return totalTrades > 0 ? `${((winningTrades / totalTrades) * 100).toFixed(1)}%` : '0.0%';
+              })()}
+            </div>
+          </div>
+
+          {/* Total Trades */}
+          <div style={{ backgroundColor: 'rgba(255,255,255,0.15)', padding: '15px', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Total Trades</div>
+            <div style={{ fontSize: '22px', fontWeight: 'bold' }}>
+              {trades.length}
+            </div>
+          </div>
+
+          {/* Winning Trades */}
+          <div style={{ backgroundColor: 'rgba(255,255,255,0.15)', padding: '15px', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Winning Trades</div>
+            <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#a5d6a7' }}>
+              {trades.filter(t => t.profit > 0).length}
+            </div>
+          </div>
+
+          {/* Losing Trades */}
+          <div style={{ backgroundColor: 'rgba(255,255,255,0.15)', padding: '15px', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Losing Trades</div>
+            <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#ef9a9a' }}>
+              {trades.filter(t => t.profit < 0).length}
+            </div>
+          </div>
+        </div>
+
+        {/* Stop Reason */}
+        {stopReason && (
+          <div style={{ marginTop: '15px', padding: '12px', backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px', opacity: 0.9 }}>Stop Reason</div>
+            <div style={{ fontSize: '16px', fontWeight: 'bold' }}>{stopReason}</div>
+          </div>
+        )}
       </div>
 
       {/* ✅ Gemini Connection Panel */}
@@ -1197,7 +1291,7 @@ function Dashboard() {
                 onClick={async () => {
                   setIsPlacingOrder(true);
                   setGeminiError(null);
-                  
+
                   const result = await placeGeminiOrder({
                     symbol: tradeSymbol,
                     side: tradeSide,
