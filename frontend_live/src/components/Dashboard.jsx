@@ -486,12 +486,45 @@ function Dashboard() {
     setUpdateSpeed(e.target.value);
   };
 
-  const handleModelSelection = (modelId) => {
-    if (isTrading) return;
+  /*const handleModelSelection = (modelId) => {
+    //if (isTrading) return;
     console.log('Card clicked for model:', modelId);
     setSelectedModels(prev =>
       prev.includes(modelId) ? prev.filter(id => id !== modelId) : [...prev, modelId]
     );
+  };*/
+
+  const handleModelSelection = (modelId) => {
+    console.log('Card clicked for model:', modelId);
+
+    setSelectedModels(prevSelected => {
+      const isAlreadySelected = prevSelected.includes(modelId);
+
+      if (isAlreadySelected) {
+        // Deselect: remove from monitoring models
+        return prevSelected.filter(id => id !== modelId);
+      } else {
+        // Select: add to monitoring models
+        // If trading is active, reset the baseline so this model starts at startingValue now
+        if (isTrading) {
+          setInitialValues(prevInit => {
+            const model = modelsLatest[modelId];
+            if (!model || typeof model.accountValue !== 'number') {
+              return prevInit;
+            }
+
+            return {
+              ...prevInit,
+              // Set the "initial" actual account value to the current one,
+              // so normalized value becomes exactly startingValue at this moment
+              [modelId]: model.accountValue
+            };
+          });
+        }
+
+        return [...prevSelected, modelId];
+      }
+    });
   };
 
   const handleStartTrading = () => {
@@ -1858,7 +1891,7 @@ function Dashboard() {
               : '🟡 Ready to Trade'}
           </div>
 
-          {isTrading && selectedModels.length > 0 && (
+          {isTrading && (
             <div
               style={{
                 marginTop: '10px',
@@ -1905,7 +1938,7 @@ function Dashboard() {
                 })()}
               </div>
 
-              <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
                 {selectedModels.map(modelId => {
                   const model = modelsLatest[modelId];
                   if (!model) return null;
@@ -1913,24 +1946,63 @@ function Dashboard() {
                   const normalizedValue = getNormalizedValue(modelId);
                   const pnl = normalizedValue - startValue;
                   const pnlPercent = ((pnl / startValue) * 100).toFixed(2);
+                  const color = model.color || '#1976d2';
 
                   return (
                     <div
                       key={modelId}
+                      onClick={() => handleModelSelection(modelId)}
                       style={{
-                        padding: '8px 12px',
-                        backgroundColor: 'white',
-                        borderRadius: '4px',
-                        borderLeft: `4px solid ${model.color || '#1976d2'}`,
-                        minWidth: '150px'
+                        padding: '15px',
+                        borderRadius: '10px',
+                        backgroundColor: '#ffffff',
+                        border: `3px solid ${color}`,
+                        minWidth: '200px',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        boxShadow: '0 4px 10px rgba(25, 118, 210, 0.3)',
+                        transform: 'translateY(0)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px'
+                      }}
+                      onMouseOver={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                        e.currentTarget.style.boxShadow = '0 6px 14px rgba(25, 118, 210, 0.4)';
+                      }}
+                      onMouseOut={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = '0 4px 10px rgba(25, 118, 210, 0.3)';
                       }}
                     >
-                      <div style={{ fontWeight: 'bold', fontSize: '13px' }}>
-                        {model.name || modelId}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div
+                          style={{
+                            width: '22px',
+                            height: '22px',
+                            borderRadius: '50%',
+                            backgroundColor: color,
+                            border: `1px solid ${color}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white',
+                            fontSize: '14px',
+                            fontWeight: 'bold',
+                            flexShrink: 0
+                          }}
+                        >
+                          ✓
+                        </div>
+                        <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#333' }}>
+                          {model.name || modelId}
+                        </div>
                       </div>
-                      <div style={{ fontSize: '16px', fontWeight: 'bold', marginTop: '4px' }}>
+
+                      <div style={{ fontSize: '20px', fontWeight: 'bold', color }}>
                         ${normalizedValue.toLocaleString()}
                       </div>
+
                       <div
                         style={{
                           fontSize: '12px',
@@ -1939,6 +2011,10 @@ function Dashboard() {
                         }}
                       >
                         {pnl >= 0 ? '▲' : '▼'} ${Math.abs(pnl).toLocaleString()} ({pnlPercent}%)
+                      </div>
+
+                      <div style={{ fontSize: '11px', color: '#4CAF50', fontWeight: 'bold' }}>
+                        🔴 LIVE
                       </div>
                     </div>
                   );
@@ -2046,10 +2122,11 @@ function Dashboard() {
                 All models are currently selected for trading
               </div>
             ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
                 {nonSelectedModels.map((model, idx) => {
                   const modelId = model.id || model.name || `model_${idx}`;
                   const currentValue = getNormalizedValue(modelId);
+                  const color = model.color || '#1976d2';
 
                   let pnl = 0;
                   let pnlPercent = '0.00';
@@ -2061,26 +2138,74 @@ function Dashboard() {
                   return (
                     <div
                       key={modelId}
+                      onClick={() => handleModelSelection(modelId)}
                       style={{
-                        padding: '10px 14px',
-                        borderRadius: '6px',
-                        backgroundColor: 'white',
-                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                        minWidth: '180px',
-                        borderLeft: `4px solid ${model.color || '#1976d2'}`
+                        padding: '15px',
+                        borderRadius: '10px',
+                        backgroundColor: '#ffffff',
+                        border: `3px solid #cccccc`,
+                        minWidth: '200px',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+                        transform: 'translateY(0)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px'
+                      }}
+                      onMouseOver={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                        e.currentTarget.style.boxShadow = '0 4px 10px rgba(0,0,0,0.25)';
+                        e.currentTarget.style.border = `3px solid ${color}`;
+                      }}
+                      onMouseOut={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.15)';
+                        e.currentTarget.style.border = '3px solid #cccccc';
                       }}
                     >
-                      <div style={{ fontWeight: 'bold', marginBottom: '4px', fontSize: '14px' }}>
-                        {model.name || modelId}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div
+                          style={{
+                            width: '22px',
+                            height: '22px',
+                            borderRadius: '50%',
+                            backgroundColor: '#eeeeee',
+                            border: '1px solid #bdbdbd',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white',
+                            fontSize: '14px',
+                            fontWeight: 'bold',
+                            flexShrink: 0
+                          }}
+                        >
+                        </div>
+                        <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#333' }}>
+                          {model.name || modelId}
+                        </div>
                       </div>
 
-                      <div style={{ fontSize: '16px' }}>
-                        Value: <strong>${currentValue.toLocaleString()}</strong>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold', color }}>
+                        ${currentValue.toLocaleString()}
                       </div>
 
                       {isTrading && initialValues[modelId] != null && (
-                        <div style={{ fontSize: '12px', marginTop: '4px', color: pnl >= 0 ? '#2e7d32' : '#c62828', fontWeight: 'bold' }}>
+                        <div
+                          style={{
+                            fontSize: '12px',
+                            marginTop: '2px',
+                            color: pnl >= 0 ? '#2e7d32' : '#c62828'
+                          }}
+                        >
                           {pnl >= 0 ? '▲' : '▼'} ${Math.abs(pnl).toLocaleString()} ({pnlPercent}%)
+                        </div>
+                      )}
+
+                      {!isTrading && (
+                        <div style={{ fontSize: '11px', color: '#4CAF50', fontWeight: 'bold' }}>
+                          🔴 LIVE
                         </div>
                       )}
                     </div>

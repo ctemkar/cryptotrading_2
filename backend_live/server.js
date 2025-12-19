@@ -93,7 +93,7 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
 --------------------------------*/
 const MODELS = [
   { id: "gemini-3-pro",      name: "Gemini-3-pro",            color: "#1f77b4", volatility: 0.5 },
-  { id: "qwen-3-next",        name: "Qwen3-Next",             color: "#ff7f0e", volatility: 0.3 },
+  { id: "qwen-3-next",       name: "Qwen3-Next",              color: "#ff7f0e", volatility: 0.3 },
   { id: "gpt-5.2",           name: "GPT-5.2",                 color: "#2ca02c", volatility: 0.7 },
   { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5",       color: "#d62728", volatility: 0.4 },
   { id: "mystery-model",     name: "Mystery Model",           color: "#9467bd", volatility: 1.0 },
