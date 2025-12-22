@@ -60,7 +60,7 @@ async function initDatabase() {
 /* ------------------------------
    GEMINI API HELPER FUNCTIONS
 --------------------------------*/
-async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
+/*async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   const url = "https://api.gemini.com" + path;
   const nonce = Date.now().toString();
   
@@ -86,7 +86,50 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
 
   const response = await axios.post(url, {}, { headers, timeout: 10000 });
   return response.data;
-}
+} */
+
+async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
+  const url = "https://api.gemini.com" + path;
+  const nonce = Date.now().toString();
+  
+  const requestPayload = {
+    request: path,
+    nonce,
+    ...payload
+  };
+
+  // ✅ FIX: For /v1/balances, add account parameter
+  if (path === "/v1/balances") {
+    requestPayload.account = "primary";  // Add this line
+  }
+
+  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
+  
+  // ✅ FIX: Ensure apiSecret is treated as a string (no extra encoding)
+  const signature = crypto
+    .createHmac("sha384", Buffer.from(apiSecret, 'utf-8'))  // Changed this line
+    .update(encodedPayload)
+    .digest("hex");
+
+  const headers = {
+    "Content-Type": "text/plain",
+    "Content-Length": "0",  // ✅ Added this required header
+    "X-GEMINI-APIKEY": apiKey,
+    "X-GEMINI-PAYLOAD": encodedPayload,
+    "X-GEMINI-SIGNATURE": signature,
+    "Cache-Control": "no-cache"
+  };
+
+  console.log("🔍 Debug - Request details:");
+  console.log("  Path:", path);
+  console.log("  API Key (first 10 chars):", apiKey.substring(0, 10) + "...");
+  console.log("  Payload:", JSON.stringify(requestPayload));
+  console.log("  Encoded Payload:", encodedPayload);
+  console.log("  Signature:", signature);
+
+  const response = await axios.post(url, {}, { headers, timeout: 10000 });
+  return response.data;
+}  
 
 /* ------------------------------
    MODELS INITIAL STATE
@@ -408,7 +451,8 @@ app.post("/api/gemini/balances", async (req, res) => {
 
   } catch (error) {
     console.error("❌ Gemini connection error:", error.message);
-    
+    console.error("❌ Full error:", error.response?.data);  // ✅ ADD THIS LINE HERE   
+  
     // Handle specific error cases
     if (error.response) {
       const status = error.response.status;

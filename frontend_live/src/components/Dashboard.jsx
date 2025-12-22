@@ -251,8 +251,14 @@ function Dashboard() {
   // ✅ OAuth-like Gemini connection handlers
   const handleOpenGeminiModal = () => {
     setShowGeminiModal(true);
-    setGeminiStep(1);
     setGeminiError(null);
+    
+    // If user has credentials stored or already typed, go to step 2
+    if (geminiApiKey || geminiApiSecret) {
+      setGeminiStep(2);
+    } else {
+      setGeminiStep(1);
+    }
   };
 
   const handleCloseGeminiModal = () => {
@@ -310,8 +316,8 @@ function Dashboard() {
   };
 
   const handleOpenGeminiSite = () => {
-    // Just advance to step 2 without opening external site
-    setGeminiStep(2);
+    // Open Gemini in new tab
+    window.open('https://exchange.gemini.com/settings/api', '_blank');
   };
 
   // ✅ ONE-TIME MIGRATION
@@ -485,14 +491,6 @@ function Dashboard() {
   const handleUpdateSpeedChange = (e) => {
     setUpdateSpeed(e.target.value);
   };
-
-  /*const handleModelSelection = (modelId) => {
-    //if (isTrading) return;
-    console.log('Card clicked for model:', modelId);
-    setSelectedModels(prev =>
-      prev.includes(modelId) ? prev.filter(id => id !== modelId) : [...prev, modelId]
-    );
-  };*/
 
   const handleModelSelection = (modelId) => {
     console.log('Card clicked for model:', modelId);
@@ -1046,28 +1044,64 @@ function Dashboard() {
                   <li>Create a new API key with <strong>Trading</strong> permissions</li>
                   <li>Copy both the <strong>API Key</strong> and <strong>Secret</strong></li>
                 </ol>
-                <button
-                  onClick={handleOpenGeminiSite}
-                  style={{
-                    width: '100%',
-                    padding: '12px',
-                    backgroundColor: '#667eea',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '8px',
-                    fontSize: '15px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer',
-                    marginTop: '15px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '8px'
-                  }}
-                >
-                  <span>🔗</span>
-                  Open Gemini API Settings
-                </button>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '15px' }}>
+                  <button
+                    onClick={handleOpenGeminiSite}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      backgroundColor: '#667eea',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '8px',
+                      fontSize: '15px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      transition: 'background-color 0.2s'
+                    }}
+                    onMouseOver={(e) => e.target.style.backgroundColor = '#5568d3'}
+                    onMouseOut={(e) => e.target.style.backgroundColor = '#667eea'}
+                  >
+                    <span>🔗</span>
+                    Open Gemini API Settings
+                  </button>
+
+                  <button
+                    onClick={() => setGeminiStep(2)}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      backgroundColor: '#ffffff',
+                      color: '#333',
+                      border: '1px solid #d1d5db',
+                      borderRadius: '8px',
+                      fontSize: '14px',
+                      fontWeight: '500',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseOver={(e) => {
+                      e.target.style.backgroundColor = '#f9fafb';
+                      e.target.style.borderColor = '#9ca3af';
+                    }}
+                    onMouseOut={(e) => {
+                      e.target.style.backgroundColor = '#ffffff';
+                      e.target.style.borderColor = '#d1d5db';
+                    }}
+                  >
+                    <span style={{ fontSize: '16px' }}>⏭️</span>
+                    I already have my API Key & Secret
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1621,8 +1655,7 @@ function Dashboard() {
                     backgroundColor: isSelected ? '#e3f2fd' : '#ffffff',
                     border: `3px solid ${isSelected ? color : '#cccccc'}`,
                     minWidth: '200px',
-                    cursor: isTrading ? 'not-allowed' : 'pointer',
-                    opacity: isTrading ? 0.6 : 1,
+                    cursor: 'pointer',
                     transition: 'all 0.2s ease',
                     boxShadow: isSelected
                       ? '0 4px 10px rgba(25, 118, 210, 0.3)'
