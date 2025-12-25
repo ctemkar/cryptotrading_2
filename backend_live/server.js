@@ -88,7 +88,7 @@ async function initDatabase() {
   return response.data;
 } */
 
-async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
+/*async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   const url = "https://api.gemini.com" + path;
   const nonce = Date.now().toString();
   
@@ -107,7 +107,8 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   
   // ✅ FIX: Ensure apiSecret is treated as a string (no extra encoding)
   const signature = crypto
-    .createHmac("sha384", Buffer.from(apiSecret, 'utf-8'))  // Changed this line
+    //.createHmac("sha384", Buffer.from(apiSecret, 'utf-8'))  // Changed this line
+    .createHmac("sha384", apiSecret)  // ✅ Use apiSecret directly as string
     .update(encodedPayload)
     .digest("hex");
 
@@ -129,7 +130,161 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
 
   const response = await axios.post(url, {}, { headers, timeout: 10000 });
   return response.data;
-}  
+} */
+
+async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
+  const url = "https://api.gemini.com" + path;
+  const nonce = Date.now().toString();
+  
+  const requestPayload = {
+    request: path,
+    nonce,
+    ...payload
+  };
+
+  // ✅ For /v1/balances, add account parameter
+  if (path === "/v1/balances") {
+    requestPayload.account = "primary";
+  }
+
+  // ✅ ALSO for /v1/order/new, add account parameter to avoid "Expected a JSON payload with accounts"
+  if (path === "/v1/order/new") {
+    requestPayload.account = requestPayload.account || "primary";
+  }
+
+  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
+  
+  // ✅ Use apiSecret directly as string
+  const signature = crypto
+    .createHmac("sha384", apiSecret)
+    .update(encodedPayload)
+    .digest("hex");
+
+  const headers = {
+    "Content-Type": "text/plain",
+    "Content-Length": "0",
+    "X-GEMINI-APIKEY": apiKey,
+    "X-GEMINI-PAYLOAD": encodedPayload,
+    "X-GEMINI-SIGNATURE": signature,
+    "Cache-Control": "no-cache"
+  };
+
+  console.log("🔍 Gemini request", { path, requestPayload });
+
+  console.log("🔍 Debug - Request details:");
+  console.log("  Path:", path);
+  console.log("  API Key (first 10 chars):", apiKey.substring(0, 10) + "...");
+  console.log("  Payload:", JSON.stringify(requestPayload));
+  console.log("  Encoded Payload:", encodedPayload);
+  console.log("  Signature:", signature);
+
+  const response = await axios.post(url, {}, { headers, timeout: 10000 });
+  return response.data;
+} 
+
+/* ------------------------------
+   GEMINI PRICE HELPER
+--------------------------------*/
+async function getGeminiPrice(symbol) {
+  try {
+    const url = `https://api.gemini.com/v1/pubticker/${symbol}`;
+    const res = await axios.get(url, { timeout: 8000 });
+    return parseFloat(res.data.last);
+  } catch (error) {
+    console.error(`Failed to fetch ${symbol} price:`, error.message);
+    return null;
+  }
+}
+
+/* -----------------------------------------
+   LIVE GEMINI POSITION TRACKING (IN-MEMORY)
+------------------------------------------*/
+
+// { [modelId_symbol]: { modelId, modelName, symbol, side, amount, entryPrice, openedAt } }
+const liveGeminiPositions = {};
+
+function livePosKey(modelId, symbol) {
+  return `${modelId}_${symbol.toLowerCase()}`;
+}
+
+function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price }) {
+  const key = livePosKey(modelId, symbol);
+  liveGeminiPositions[key] = {
+    modelId,
+    modelName,
+    symbol: symbol.toLowerCase(),
+    side: 'LONG',
+    amount: parseFloat(amount),
+    entryPrice: parseFloat(price),
+    openedAt: Date.now(),
+  };
+  console.log('📌 [LIVE] Opened Gemini position:', liveGeminiPositions[key]);
+}
+
+async function closeLiveGeminiPositionAndRecord({
+  modelId,
+  modelName,
+  symbol,
+  amount,
+  exitPrice,
+}) {
+  const key = livePosKey(modelId, symbol);
+  const pos = liveGeminiPositions[key];
+
+  if (!pos) {
+    console.warn('⚠️ [LIVE] No open Gemini position found for', key);
+    return null;
+  }
+
+  const qty = amount ? parseFloat(amount) : pos.amount;
+  const entryPrice = pos.entryPrice;
+  const exit = parseFloat(exitPrice);
+  const pnl = (exit - entryPrice) * qty; // LONG only for now
+  const timestamp = Date.now();
+  const totalValue = (exit * qty).toFixed(2);
+
+  await db.query(
+    `INSERT INTO trades (model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      modelId,
+      modelName,
+      'SELL',                 // closing trade
+      symbol.toUpperCase(),
+      exit,
+      qty,
+      totalValue,
+      timestamp,
+    ]
+  );
+
+  console.log(
+    `✅ [LIVE] Closed Gemini position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qty}, P&L = ${pnl.toFixed(
+      2
+    )}`
+  );
+
+  io.emit('position_closed', {
+    model_id: modelId,
+    model_name: modelName,
+    symbol: symbol.toUpperCase(),
+    entryPrice,
+    exitPrice: exit,
+    quantity: qty,
+    pnl,
+    timestamp,
+  });
+
+  delete liveGeminiPositions[key];
+
+  return {
+    entryPrice,
+    exitPrice: exit,
+    quantity: qty,
+    pnl,
+    timestamp,
+  };
+}
 
 /* ------------------------------
    MODELS INITIAL STATE
@@ -371,7 +526,7 @@ app.get("/api/trades", async (req, res) => {
 /* ----------------------------------------
    API ENDPOINT: GET GEMINI BALANCES
 -----------------------------------------*/
-app.post("/api/gemini/balances", async (req, res) => {
+/*app.post("/api/gemini/balances", async (req, res) => {
   try {
     console.log("📥 Received request body:", req.body);
     const { apiKey, apiSecret } = req.body;
@@ -388,7 +543,7 @@ app.post("/api/gemini/balances", async (req, res) => {
     
     // Call Gemini API
     const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
-
+    console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2)); // <-- add this
     console.log("✅ Gemini API response received");
 
     // Calculate total USD value and organize balances
@@ -486,6 +641,232 @@ app.post("/api/gemini/balances", async (req, res) => {
       });
     }
   }
+}); */
+
+app.post("/api/gemini/balances", async (req, res) => {
+  try {
+    console.log("📥 Received request body:", req.body);
+    const { apiKey, apiSecret } = req.body;
+
+    // Validate input
+    if (!apiKey || !apiSecret) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "API Key and API Secret are required" 
+      });
+    }
+
+    console.log("🔗 Connecting to Gemini API for balances...");
+    
+    // Call Gemini API
+    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
+
+    console.log("✅ Gemini API response received");
+    console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2));
+
+    // ✅ Get REAL prices from Gemini
+    /*const [btcPrice, ethPrice, solPrice] = await Promise.all([
+      getGeminiPrice("btcusd"),
+      getGeminiPrice("ethusd"),
+      getGeminiPrice("solusd")
+    ]); */
+
+    const [
+        btcPrice, ethPrice, solPrice,
+        xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
+        shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
+        hntPrice, dotPrice, ftmPrice, skyPrice
+      ] = await Promise.all([
+        getGeminiPrice("btcusd"),
+        getGeminiPrice("ethusd"),
+        getGeminiPrice("solusd"),
+        getGeminiPrice("xrpusd"),
+        getGeminiPrice("avaxusd"),
+        getGeminiPrice("linkusd"),
+        getGeminiPrice("daiusd"),
+        getGeminiPrice("ampusd"),
+        getGeminiPrice("shibusd"),
+        getGeminiPrice("atomusd"),
+        getGeminiPrice("dogeusd"),
+        getGeminiPrice("polusd"),
+        getGeminiPrice("rndrusd"),
+        getGeminiPrice("hntusd"),
+        getGeminiPrice("dotusd"),
+        getGeminiPrice("ftmusd"),
+        getGeminiPrice("skyusd")
+      ]);
+
+    //console.log("💵 Real Gemini prices:", { btcPrice, ethPrice, solPrice });
+
+    console.log("💵 Real Gemini prices:", {
+      btcPrice, ethPrice, solPrice,
+      xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
+      shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
+      hntPrice, dotPrice, ftmPrice, skyPrice
+    });
+
+    // Calculate total USD value and organize balances
+    let totalUsd = 0;
+    const balanceData = {
+      btc: 0,
+      eth: 0,
+      usdc: 0,
+      sol: 0,
+      other: []
+    };
+
+    balances.forEach(balance => {
+      const currency = balance.currency.toLowerCase();
+      const amount = parseFloat(balance.available) || 0;
+
+      if (amount <= 0) return;
+
+      /*if (amount > 0) {
+        switch(currency) {
+          case "btc":
+            balanceData.btc = amount;
+            if (btcPrice) totalUsd += amount * btcPrice;
+            break;
+          case "eth":
+            balanceData.eth = amount;
+            if (ethPrice) totalUsd += amount * ethPrice;
+            break;
+          case "sol":
+            balanceData.sol = amount;
+            if (solPrice) totalUsd += amount * solPrice;
+            break;
+          case "usdc":
+          case "usd":
+          case "gusd":
+            balanceData.usdc += amount;
+            totalUsd += amount;
+            break;
+          default:
+            balanceData.other.push({
+              currency: balance.currency,
+              amount: amount
+            });
+        }
+      }*/
+
+      switch (currency) {
+          case "btc":
+            balanceData.btc = amount;
+            if (btcPrice) totalUsd += amount * btcPrice;
+            break;
+          case "eth":
+            balanceData.eth = amount;
+            if (ethPrice) totalUsd += amount * ethPrice;
+            break;
+          case "sol":
+            balanceData.sol = amount;
+            if (solPrice) totalUsd += amount * solPrice;
+            break;
+          case "xrp":
+            if (xrpPrice) totalUsd += amount * xrpPrice;
+            break;
+          case "avax":
+            if (avaxPrice) totalUsd += amount * avaxPrice;
+            break;
+          case "link":
+            if (linkPrice) totalUsd += amount * linkPrice;
+            break;
+          case "dai":
+            if (daiPrice) totalUsd += amount * daiPrice;
+            break;
+          case "amp":
+            if (ampPrice) totalUsd += amount * ampPrice;
+            break;
+          case "shib":
+            if (shibPrice) totalUsd += amount * shibPrice;
+            break;
+          case "atom":
+            if (atomPrice) totalUsd += amount * atomPrice;
+            break;
+          case "doge":
+            if (dogePrice) totalUsd += amount * dogePrice;
+            break;
+          case "pol": // Polygon in your screenshot
+            if (polPrice) totalUsd += amount * polPrice;
+            break;
+          case "rndr":
+            if (rndrPrice) totalUsd += amount * rndrPrice;
+            break;
+          case "hnt":
+            if (hntPrice) totalUsd += amount * hntPrice;
+            break;
+          case "dot":
+            if (dotPrice) totalUsd += amount * dotPrice;
+            break;
+          case "ftm":
+            if (ftmPrice) totalUsd += amount * ftmPrice;
+            break;
+          case "sky":
+            if (skyPrice) totalUsd += amount * skyPrice;
+            break;
+          case "usdc":
+          case "usd":
+          case "gusd":
+            balanceData.usdc += amount;
+            totalUsd += amount;      // cash added 1:1
+            break;
+
+          default:
+            // Keep for display, but also try to value later if you wish
+            balanceData.other.push({
+              currency: balance.currency,
+              amount: amount
+            });
+        }
+    });
+
+    balanceData.totalUsd = parseFloat(totalUsd.toFixed(2));
+
+    console.log("💰 Processed balance data:", balanceData);
+
+    res.json({
+      success: true,
+      balance: balanceData,
+      message: "Successfully fetched Gemini balance"
+    });
+
+  } catch (error) {
+    console.error("❌ Gemini connection error:", error.message);
+    console.error("❌ Full error:", error.response?.data);
+    
+    // Handle specific error cases
+    if (error.response) {
+      const status = error.response.status;
+      const data = error.response.data;
+      
+      if (status === 400) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid API credentials or malformed request"
+        });
+      } else if (status === 403) {
+        return res.status(403).json({
+          success: false,
+          error: "Invalid API Key or Secret. Please check your credentials."
+        });
+      } else {
+        return res.status(status).json({
+          success: false,
+          error: data.message || "Gemini API error"
+        });
+      }
+    } else if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+      return res.status(504).json({
+        success: false,
+        error: "Connection to Gemini timed out. Please try again."
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to connect to Gemini. Please try again later."
+      });
+    }
+  }
 });
 
 /* ----------------------------------------
@@ -526,7 +907,7 @@ app.get("/api/gemini/market-trades", async (req, res) => {
 /* ----------------------------------------
    API ENDPOINT: PLACE GEMINI ORDER
 -----------------------------------------*/
-app.post("/api/gemini/order", async (req, res) => {
+/*app.post("/api/gemini/order", async (req, res) => {
   try {
     const { apiKey, apiSecret, symbol, side, amount, price, type = 'exchange limit' } = req.body;
 
@@ -583,6 +964,7 @@ app.post("/api/gemini/order", async (req, res) => {
       side: side.toLowerCase(),
       type: type,
       options: ['maker-or-cancel'] // Prevents immediate execution, safer for testing
+      // NOTE: account is added inside geminiRequest for /v1/order/new
     };
 
     // Call Gemini API to place order
@@ -608,14 +990,160 @@ app.post("/api/gemini/order", async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error placing order:", error.message);
-    
+    console.error("❌ Full error:", error.response?.data || error);
+
     if (error.response) {
       const status = error.response.status;
       const data = error.response.data;
       
       return res.status(status).json({
         success: false,
-        error: data.message || "Failed to place order"
+        error: data.message || data.reason || "Failed to place order",
+        details: data
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: error.message || "Failed to place order"
+      });
+    }
+  }
+}); */
+
+app.post("/api/gemini/order", async (req, res) => {
+  try {
+    const {
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      amount,
+      price,
+      type = 'exchange limit',
+
+      // NEW: for live trading P&L
+      modelId,
+      modelName,
+      closePosition, // boolean: true when called from "Stop Trading"
+    } = req.body;
+
+    // Validate input
+    if (!apiKey || !apiSecret) {
+      return res.status(400).json({
+        success: false,
+        error: "API Key and API Secret are required"
+      });
+    }
+
+    if (!symbol || !side || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: "Symbol, side (buy/sell), and amount are required"
+      });
+    }
+
+    // Validate side
+    if (!['buy', 'sell'].includes(side.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: "Side must be 'buy' or 'sell'"
+      });
+    }
+
+    // Validate amount
+    const amountNum = parseFloat(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Amount must be a positive number"
+      });
+    }
+
+    // Validate price for limit orders
+    if (type.includes('limit')) {
+      const priceNum = parseFloat(price);
+      if (!price || isNaN(priceNum) || priceNum <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Price is required for limit orders and must be a positive number"
+        });
+      }
+    }
+
+    console.log(
+      `🔗 [LIVE] Placing ${side} order on Gemini: ${amount} ${symbol} @ $${price} (model: ${
+        modelName || 'N/A'
+      }, close=${!!closePosition})`
+    );
+
+    // Prepare order payload
+    const orderPayload = {
+      symbol: symbol.toLowerCase(),
+      amount: amount.toString(),
+      price: price.toString(),
+      side: side.toLowerCase(),
+      type: type,
+      options: ['maker-or-cancel'], // Prevents immediate execution, safer for testing
+      // NOTE: account is added inside geminiRequest for /v1/order/new
+    };
+
+    // Call Gemini API to place order
+    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", orderPayload);
+
+    console.log("✅ [LIVE] Order placed on Gemini:", order.order_id);
+
+    // When we BUY and the order is linked to a model => open live position
+    if (side.toLowerCase() === 'buy' && modelId && modelName) {
+      openLiveGeminiPosition({
+        modelId,
+        modelName,
+        symbol,
+        amount,
+        price,
+      });
+    }
+
+    // When we SELL with closePosition=true => close live position + log P&L
+    let closingInfo = null;
+    if (side.toLowerCase() === 'sell' && closePosition && modelId && modelName) {
+      closingInfo = await closeLiveGeminiPositionAndRecord({
+        modelId,
+        modelName,
+        symbol,
+        amount,
+        exitPrice: price,
+      });
+    }
+
+    res.json({
+      success: true,
+      order: {
+        order_id: order.order_id,
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        price: order.price,
+        amount: order.original_amount,
+        remaining: order.remaining_amount,
+        executed: order.executed_amount,
+        timestamp: order.timestamp
+      },
+      positionClose: closingInfo,
+      message: "Order placed successfully"
+    });
+
+  } catch (error) {
+    console.error("❌ [LIVE] Error placing Gemini order:", error.message);
+    console.error("❌ [LIVE] Full error:", error.response?.data || error);
+
+    if (error.response) {
+      const status = error.response.status;
+      const data = error.response.data;
+      
+      return res.status(status).json({
+        success: false,
+        error: data.message || data.reason || "Failed to place order",
+        details: data
       });
     } else {
       return res.status(500).json({

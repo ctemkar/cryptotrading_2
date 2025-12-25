@@ -568,7 +568,7 @@ function Dashboard() {
     setFinalProfitLoss(null);
   };
 
-  const handleStopTrading = () => {
+ /* const handleStopTrading = () => {
     // Calculate final P/L before stopping
     const totalProfit = selectedModels.reduce((sum, modelId) => {
       const currentValue = getNormalizedValue(modelId);
@@ -579,6 +579,101 @@ function Dashboard() {
     setTradingStopped(true);
     setFinalProfitLoss(totalProfit);
     setStopReason('Trading stopped manually');
+  };*/
+
+  const handleStopTrading = async () => {
+    // 1) Existing simulator stop + P/L logic (unchanged)
+    const totalProfit = selectedModels.reduce((sum, modelId) => {
+      const currentValue = getNormalizedValue(modelId);
+      return sum + (currentValue - startValue);
+    }, 0);
+
+    setIsTrading(false);
+    setTradingStopped(true);
+    setFinalProfitLoss(totalProfit);
+    setStopReason('Trading stopped manually');
+
+    // 2) LIVE GEMINI CLOSE: sell all BTC for the primary model at market
+
+    // If Gemini isn't connected, we stop here (simulator-only stop)
+    if (!isGeminiConnected) {
+      console.log('Gemini not connected, skipping live BTC close.');
+      return;
+    }
+
+    // Need at least one selected model to treat as "primary"
+    if (!selectedModels || selectedModels.length === 0) {
+      console.log('No selected models; skipping live BTC close.');
+      return;
+    }
+
+    try {
+      // Primary model = first in selectedModels at time of stop
+      const primaryModelId = selectedModels[0];
+      const primaryModel = modelsLatest[primaryModelId];
+      const primaryModelName = primaryModel?.name || primaryModelId;
+
+      // Find BTC balance from Gemini balances
+      const btcBalanceEntry = geminiBalances.find(
+        (b) =>
+          b.currency === 'BTC' ||
+          b.currency === 'btc' ||
+          b.currency === 'XBT' ||
+          b.currency === 'xbt'
+      );
+
+      if (!btcBalanceEntry) {
+        console.log('No BTC balance found on Gemini; nothing to sell.');
+        return;
+      }
+
+      const btcAmountRaw =
+        btcBalanceEntry.amount || btcBalanceEntry.available || btcBalanceEntry.availableForWithdrawal;
+
+      const btcAmount = typeof btcAmountRaw === 'number'
+        ? btcAmountRaw
+        : parseFloat(String(btcAmountRaw));
+
+      if (!btcAmount || btcAmount <= 0) {
+        console.log('BTC balance is zero or invalid; nothing to sell.');
+        return;
+      }
+
+      // Gemini expects a string amount with correct precision
+      const amountToSell = btcAmount.toString();
+
+      console.log(
+        `[LIVE] Stop Trading -> Selling ALL BTC on Gemini: ${amountToSell} BTC (btcusd) for primary model ${primaryModelName}`
+      );
+
+      // Market order: type = 'exchange market', no price needed
+      const result = await placeGeminiOrder({
+        symbol: 'btcusd',
+        side: 'sell',
+        amount: amountToSell,
+        type: 'exchange market',
+        modelId: primaryModelId,
+        modelName: primaryModelName,
+        closePosition: true, // tells backend to treat this as closing the position & log P&L
+      });
+
+      if (!result.success) {
+        console.error('Failed to place BTC close order on Gemini:', result.error || result);
+        setGeminiError(
+          result.error || 'Failed to place BTC close order on Gemini when stopping trading'
+        );
+      } else {
+        console.log('✅ BTC close order placed on Gemini:', result.data || result);
+        // Optional: refresh balances and market trades right after closing
+        refreshGeminiBalances();
+        refreshGeminiMarketTrades();
+      }
+    } catch (err) {
+      console.error('Error while closing BTC position on Gemini:', err);
+      setGeminiError(
+        err.message || 'Error while closing BTC position on Gemini when stopping trading'
+      );
+    }
   };
 
   const handleReset = () => {

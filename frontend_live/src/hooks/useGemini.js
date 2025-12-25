@@ -13,13 +13,13 @@ export function useGemini() {
   const [apiSecret, setApiSecret] = useState(() => localStorage.getItem('geminiApiSecret') || '');
 
   // Function to fetch balances
-  const fetchBalances = async (key, secret) => {
+  /*const fetchBalances = async (key, secret) => {
     try {
      /* const response = await axios.post('http://localhost:3001/api/gemini/balances', {
         apiKey: key || apiKey,
         apiSecret: secret || apiSecret
       });*/
-        const response = await axios.post('/api/gemini/balances', {
+        /*const response = await axios.post('/api/gemini/balances', {
             apiKey: key || apiKey,
             apiSecret: secret || apiSecret
         });
@@ -37,7 +37,39 @@ export function useGemini() {
       setIsConnected(false);
       return { success: false, error: err.response?.data?.error || err.message };
     }
-  };
+  };*/
+
+  const fetchBalances = async (key, secret) => {
+  try {
+    const response = await axios.post(
+      '/api/gemini/balances',
+      {
+        apiKey: key || apiKey,
+        apiSecret: secret || apiSecret,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (response.data.success) {
+      setBalances(response.data.balance);
+      setIsConnected(true);
+      return { success: true, data: response.data.balance };
+    } else {
+      throw new Error(response.data.error || 'Failed to fetch balances');
+    } 
+  } catch (err) {
+    console.error('Error fetching Gemini balances:', err);
+    setError(
+      err.response?.data?.error || err.message || 'Failed to fetch balances'
+    );
+    setIsConnected(false);
+    return { success: false, error: err.response?.data?.error || err.message };
+  }
+};
 
   // Function to fetch market trades
   const fetchMarketTrades = async (symbol = 'btcusd', limit = 20) => {
@@ -60,13 +92,41 @@ export function useGemini() {
   };
 
   // Function to place an order
-  const placeOrder = async (orderData) => {
+  /*const placeOrder = async (orderData) => {
     try {
       setLoading(true);
       const response = await axios.post('/api/gemini/order', {
         apiKey,
         apiSecret,
         ...orderData
+      });
+
+      if (response.data.success) {
+        // Refresh balances after successful order
+        await fetchBalances();
+        return { success: true, data: response.data.order };
+      } else {
+        throw new Error(response.data.error || 'Failed to place order');
+      }
+    } catch (err) {
+      console.error('Error placing order:', err);
+      const errorMsg = err.response?.data?.error || err.message || 'Failed to place order';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }; */
+
+  // Function to place an order
+// orderData can include: symbol, side, amount, price, type, modelId, modelName, closePosition
+const placeOrder = async (orderData) => {
+    try {
+      setLoading(true);
+      const response = await axios.post('/api/gemini/order', {
+        apiKey,
+        apiSecret,
+        ...orderData,   // <-- passes modelId, modelName, closePosition, type, etc.
       });
 
       if (response.data.success) {
