@@ -16,6 +16,9 @@ function Dashboard() {
   const [trades, setTrades] = useState([]);
   const [loadingTrades, setLoadingTrades] = useState(true);
 
+  // ✅ NEW: Live Gemini market trades from WebSocket
+  const [liveGeminiTrades, setLiveGeminiTrades] = useState([]);
+
   // ✅ useGemini hook for enhanced Gemini integration
   const {
     balances: geminiBalances,
@@ -125,6 +128,20 @@ function Dashboard() {
       socket.off('new_trade');
     };
   }, []);
+
+  // ✅ NEW: Listen for real-time Gemini market trades
+useEffect(() => {
+  const handleGeminiTrades = (payload) => {
+    console.log('💎 Live Gemini trades update:', payload);
+    setLiveGeminiTrades(payload.trades || []);
+  };
+
+  socket.on('gemini_market_trades', handleGeminiTrades);
+
+  return () => {
+    socket.off('gemini_market_trades', handleGeminiTrades);
+  };
+}, []);
 
   // ✅ Initialize Google Sign-In
   useEffect(() => {
@@ -525,7 +542,7 @@ function Dashboard() {
     });
   };
 
-  const handleStartTrading = () => {
+  /*const handleStartTrading = () => {
     if (selectedModels.length === 0) {
       alert('Please select at least one model to trade');
       return;
@@ -566,7 +583,99 @@ function Dashboard() {
     setTradingStopped(false);
     setStopReason('');
     setFinalProfitLoss(null);
-  };
+  };*/
+
+  const handleStartTrading = async () => {
+  if (selectedModels.length === 0) {
+    alert('Please select at least one model to trade');
+    return;
+  }
+
+  const sv = parseFloat(startingValue);
+  if (!sv || sv <= 0) {
+    alert('Please enter a valid starting value (must be greater than 0)');
+    return;
+  }
+
+  if (!stopLoss && !profitTarget) {
+    alert('Please enter at least one value (Stop Loss or Profit Target)');
+    return;
+  }
+
+  const stopLossValue = parseFloat(stopLoss);
+  const profitTargetValue = parseFloat(profitTarget);
+
+  if (stopLoss && (isNaN(stopLossValue) || stopLossValue <= 0)) {
+    alert('Please enter a valid Stop Loss value (must be greater than 0)');
+    return;
+  }
+
+  if (profitTarget && (isNaN(profitTargetValue) || profitTargetValue <= 0)) {
+    alert('Please enter a valid Profit Target value (must be greater than 0)');
+    return;
+  }
+
+  // --- existing simulator init ---
+  const initVals = {};
+  Object.keys(modelsLatest).forEach((id) => {
+    const m = modelsLatest[id];
+    initVals[id] = m?.accountValue || sv;
+  });
+  setInitialValues(initVals);
+
+  setIsTrading(true);
+  setTradingStopped(false);
+  setStopReason('');
+  setFinalProfitLoss(null);
+
+  // --- NEW: open a small live BTC position on Gemini for the primary model ---
+  if (!isGeminiConnected) {
+    console.log('Gemini not connected, skipping live BUY at start.');
+    return;
+  }
+
+  try {
+    // Primary model = first selected model
+    const primaryModelId = selectedModels[0];
+    const primaryModel = modelsLatest[primaryModelId];
+    const primaryModelName = primaryModel?.name || primaryModelId;
+
+    // Choose a very small, safe amount to start with
+    const amountToBuy = '0.0001'; // ~$8.93 at current BTC price
+
+    console.log(
+      `[LIVE] Start Trading -> Buying ${amountToBuy} BTC on Gemini for primary model ${primaryModelName}`
+    );
+
+    const result = await placeGeminiOrder({
+      symbol: 'btcusd',
+      side: 'buy',
+      amount: amountToBuy,
+      type: 'exchange market',  // market BUY
+      modelId: primaryModelId,
+      modelName: primaryModelName,
+      closePosition: false,      // this is an opening trade, not closing
+    });
+
+    if (!result.success) {
+      console.error('Failed to place initial BUY on Gemini:', result.error || result);
+      setGeminiError(
+        result.error || 'Failed to place initial BUY on Gemini when starting trading'
+      );
+    } else {
+      console.log('✅ Initial BUY order placed on Gemini:', result.data || result);
+      // Refresh Gemini panels so you see it immediately
+      refreshGeminiBalances();
+      refreshGeminiMarketTrades();
+    }
+  } catch (err) {
+    console.error('Error while placing initial BUY on Gemini:', err);
+    setGeminiError(
+      err.message || 'Error while placing initial BUY on Gemini when starting trading'
+    );
+  }
+};
+
 
  /* const handleStopTrading = () => {
     // Calculate final P/L before stopping
@@ -1000,6 +1109,24 @@ function Dashboard() {
                     onMouseOut={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.2)'}
                   >
                     🔄 Refresh
+                  </button>
+                  <button
+                    className="gemini-stop-button"
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: 'rgba(255,255,255,0.2)',
+                      color: 'white',
+                      border: '1px solid white',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      transition: 'background-color 0.2s'
+                    }}
+                    onClick={handleStopTrading}
+                    disabled={!isGeminiConnected}
+                  >
+                    Stop Trading (Close Position)
                   </button>
                   <button
                     onClick={handleGeminiDisconnect}
@@ -1570,7 +1697,7 @@ function Dashboard() {
             <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
               Loading market trades...
             </div>
-          ) : geminiMarketTrades.length === 0 ? (
+          ) : (liveGeminiTrades.length === 0 && geminiMarketTrades.length === 0) ? (
             <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
               No market trades available
             </div>
@@ -1580,6 +1707,7 @@ function Dashboard() {
                 <thead>
                   <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
                     <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
+                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Model</th>
                     <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Type</th>
                     <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
                     <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Amount</th>
@@ -1587,7 +1715,7 @@ function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {geminiMarketTrades.map((trade, index) => (
+                  {(liveGeminiTrades.length > 0 ? liveGeminiTrades : geminiMarketTrades).map((trade, index) => (
                     <tr
                       key={trade.tid || index}
                       style={{ borderBottom: '1px solid #eee' }}
@@ -1595,6 +1723,7 @@ function Dashboard() {
                       <td style={{ padding: '12px', color: '#666' }}>
                         {new Date(trade.timestampms).toLocaleTimeString()}
                       </td>
+                      <td>{trade.modelName || trade.modelId || '-'}</td>
                       <td style={{ padding: '12px', textAlign: 'center' }}>
                         <span
                           style={{

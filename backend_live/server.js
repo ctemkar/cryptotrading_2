@@ -58,6 +58,16 @@ async function initDatabase() {
 }
 
 /* ------------------------------
+   GEMINI MARKET TRADES CACHE
+--------------------------------*/
+// --- Gemini public trades cache (per symbol) ---
+const geminiMarketTradesCache = {
+  btcusd: [],
+  ethusd: [],
+  solusd: []
+};
+
+/* ------------------------------
    GEMINI API HELPER FUNCTIONS
 --------------------------------*/
 /*async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
@@ -387,6 +397,7 @@ async function generateTrade(modelId, modelName) {
 let UPDATE_INTERVAL = 1500; // Default 1.5 seconds
 let updateIntervalId = null;
 let tradeIntervalId = null;
+let geminiTradesIntervalId = null; // NEW: for auto-polling Gemini trades
 
 // Function to update model values
 function updateModels() {
@@ -506,6 +517,28 @@ function startTradeGeneration() {
   }, 7000); // Generate a trade every 7 seconds
 
   console.log("✅ Auto-trade generation started");
+}
+
+// NEW: Function to auto-poll Gemini market trades and broadcast via WebSocket
+function startGeminiTradesPolling() {
+  if (geminiTradesIntervalId) {
+    clearInterval(geminiTradesIntervalId);
+  }
+
+  geminiTradesIntervalId = setInterval(async () => {
+    try {
+      // Poll for btcusd trades (you can add more symbols if needed)
+      await axios.get('http://localhost:3001/api/gemini/market-trades', {
+        params: { symbol: 'btcusd', limit: 20 },
+        timeout: 10000,
+      });
+      console.log('🔄 Auto-polled Gemini market trades (btcusd)');
+    } catch (e) {
+      console.error('❌ Failed to poll Gemini trades:', e.message);
+    }
+  }, 5000); // Poll every 5 seconds
+
+  console.log("✅ Gemini market trades auto-polling started (every 5s)");
 }
 
 /* ----------------------------------------
@@ -871,6 +904,7 @@ app.post("/api/gemini/balances", async (req, res) => {
 
 /* ----------------------------------------
    API ENDPOINT: GET GEMINI MARKET TRADES
+   (NOW WITH WEBSOCKET BROADCAST)
 -----------------------------------------*/
 app.get("/api/gemini/market-trades", async (req, res) => {
   try {
@@ -887,11 +921,23 @@ app.get("/api/gemini/market-trades", async (req, res) => {
       }
     );
 
-    console.log(`✅ Fetched ${response.data.length} market trades`);
+    const trades = response.data || [];
+    console.log(`✅ Fetched ${trades.length} market trades`);
 
+    // --- NEW: update cache ---
+    const symbolKey = symbol.toLowerCase();
+    geminiMarketTradesCache[symbolKey] = trades.slice(0, limit);
+
+    // --- NEW: broadcast to all connected clients over WebSocket ---
+    io.emit('gemini_market_trades', {
+      symbol: symbolKey,
+      trades: geminiMarketTradesCache[symbolKey],
+    });
+
+    // existing HTTP response
     res.json({
       success: true,
-      trades: response.data,
+      trades,
       symbol
     });
 
@@ -1180,6 +1226,15 @@ io.on("connection", socket => {
 
   socket.emit("crypto_snapshot", cryptoSnapshot);
 
+  // --- NEW: Send last known Gemini trades snapshot (optional but nice) ---
+  const lastBtcTrades = geminiMarketTradesCache['btcusd'] || [];
+  if (lastBtcTrades.length > 0) {
+    socket.emit('gemini_market_trades', {
+      symbol: 'btcusd',
+      trades: lastBtcTrades,
+    });
+  }
+
   // Handle update speed changes from client
   socket.on("setUpdateSpeed", (newSpeed) => {
     console.log(`Update speed changed to: ${newSpeed}ms`);
@@ -1201,12 +1256,14 @@ async function startServer() {
   // Start the update intervals
   startUpdateInterval();
   startTradeGeneration();
+  startGeminiTradesPolling(); // NEW: auto-poll Gemini trades every 5s
 
   server.listen(3001, () => {
     console.log("🚀 Backend running on port 3001");
     console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
     console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
     console.log("💎 Gemini API endpoints ready");
+    console.log("🔄 Gemini market trades WebSocket broadcasting enabled");
   });
 }
 
