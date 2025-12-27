@@ -12,6 +12,16 @@ function Dashboard() {
   const [userInfo, setUserInfo] = useState(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
 
+  // ✅ Symbol selection state
+const [selectedSymbol, setSelectedSymbol] = useState('btcusd');
+
+// ✅ Available symbols
+const AVAILABLE_SYMBOLS = [
+  { value: 'btcusd', label: 'BTC / USD' },
+  { value: 'ethusd', label: 'ETH / USD' },
+  { value: 'solusd', label: 'SOL / USD' },
+];
+
   // ✅ Trades State
   const [trades, setTrades] = useState([]);
   const [loadingTrades, setLoadingTrades] = useState(true);
@@ -648,7 +658,7 @@ useEffect(() => {
     );
 
     const result = await placeGeminiOrder({
-      symbol: 'btcusd',
+      symbol: selectedSymbol, //'btcusd',
       side: 'buy',
       amount: amountToBuy,
       type: 'exchange market',  // market BUY
@@ -757,7 +767,7 @@ useEffect(() => {
 
       // Market order: type = 'exchange market', no price needed
       const result = await placeGeminiOrder({
-        symbol: 'btcusd',
+        symbol: selectedSymbol, //'btcusd',
         side: 'sell',
         amount: amountToSell,
         type: 'exchange market',
@@ -1110,24 +1120,7 @@ useEffect(() => {
                   >
                     🔄 Refresh
                   </button>
-                  <button
-                    className="gemini-stop-button"
-                    style={{
-                      padding: '8px 16px',
-                      backgroundColor: 'rgba(255,255,255,0.2)',
-                      color: 'white',
-                      border: '1px solid white',
-                      borderRadius: '6px',
-                      fontSize: '13px',
-                      fontWeight: 'bold',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s'
-                    }}
-                    onClick={handleStopTrading}
-                    disabled={!isGeminiConnected}
-                  >
-                    Stop Trading (Close Position)
-                  </button>
+                  
                   <button
                     onClick={handleGeminiDisconnect}
                     style={{
@@ -1646,115 +1639,7 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ✅ Last 20 Market Trades from Gemini */}
-      {isGeminiConnected && (
-        <div
-          style={{
-            background: '#ffffff',
-            padding: '20px',
-            borderRadius: '8px',
-            marginBottom: '20px',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button
-                onClick={() => refreshGeminiMarketTrades()}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#667eea',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '13px',
-                  fontWeight: 'bold',
-                  cursor: 'pointer'
-                }}
-              >
-                🔄 Refresh
-              </button>
-              <button
-                onClick={() => setShowTradeModal(true)}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#4caf50',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '13px',
-                  fontWeight: 'bold',
-                  cursor: 'pointer'
-                }}
-              >
-                📊 Place Order
-              </button>
-            </div>
-          </div>
-
-          {geminiLoading ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
-              Loading market trades...
-            </div>
-          ) : (liveGeminiTrades.length === 0 && geminiMarketTrades.length === 0) ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
-              No market trades available
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
-                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
-                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Model</th>
-                    <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Type</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Amount</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(liveGeminiTrades.length > 0 ? liveGeminiTrades : geminiMarketTrades).map((trade, index) => (
-                    <tr
-                      key={trade.tid || index}
-                      style={{ borderBottom: '1px solid #eee' }}
-                    >
-                      <td style={{ padding: '12px', color: '#666' }}>
-                        {new Date(trade.timestampms).toLocaleTimeString()}
-                      </td>
-                      <td>{trade.modelName || trade.modelId || '-'}</td>
-                      <td style={{ padding: '12px', textAlign: 'center' }}>
-                        <span
-                          style={{
-                            padding: '4px 12px',
-                            borderRadius: '4px',
-                            fontWeight: 'bold',
-                            fontSize: '12px',
-                            backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
-                            color: trade.type === 'buy' ? '#2e7d32' : '#c62828'
-                          }}
-                        >
-                          {trade.type.toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
-                        ${parseFloat(trade.price).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
-                        {parseFloat(trade.amount).toFixed(4)}
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
-                        ${(parseFloat(trade.price) * parseFloat(trade.amount)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+      
 
       {/* Debug Info Panel */}
       <div
@@ -1956,6 +1841,35 @@ useEffect(() => {
         <h2>Trading Controls</h2>
 
         <div style={{ display: 'flex', gap: '20px', marginBottom: '15px', flexWrap: 'wrap' }}>
+          {/* ✅ NEW: Symbol Selection Dropdown */}
+          <div style={{ flex: '1', minWidth: '200px' }}>
+       pbb     <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
+              Trading Symbol:
+            </label>
+            <select
+              value={selectedSymbol}
+              onChange={(e) => setSelectedSymbol(e.target.value)}
+              disabled={isTrading}
+              style={{
+                width: '100%',
+                padding: '10px',
+                fontSize: '16px',
+                borderRadius: '4px',
+                border: '1px solid #ccc',
+                backgroundColor: isTrading ? '#f5f5f5' : 'white',
+                cursor: isTrading ? 'not-allowed' : 'pointer'
+              }}
+            >
+              {AVAILABLE_SYMBOLS.map((symbol) => (
+                <option key={symbol.value} value={symbol.value}>
+                  {symbol.label}
+                </option>
+              ))}
+            </select>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
+              Select which cryptocurrency to trade
+            </div>
+          </div>
           <div style={{ flex: '1', minWidth: '200px' }}>
             <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
               Starting Value ($):
@@ -2473,6 +2387,102 @@ useEffect(() => {
           </div>
         )}
       </div>
+
+      {/* ✅ Last 20 Market Trades from Gemini */}
+      {isGeminiConnected && (
+        <div
+          style={{
+            background: '#ffffff',
+            padding: '20px',
+            borderRadius: '8px',
+            marginBottom: '20px',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => refreshGeminiMarketTrades(selectedSymbol)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#667eea',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Refresh
+              </button>
+              
+            </div>
+          </div>
+
+          {geminiLoading ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+              Loading market trades...
+            </div>
+          ) : (liveGeminiTrades.length === 0 && geminiMarketTrades.length === 0) ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
+              No market trades available
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
+                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
+                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Model</th>
+                    <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Type</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Amount</th>
+                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(liveGeminiTrades.length > 0 ? liveGeminiTrades : geminiMarketTrades).map((trade, index) => (
+                    <tr
+                      key={trade.tid || index}
+                      style={{ borderBottom: '1px solid #eee' }}
+                    >
+                      <td style={{ padding: '12px', color: '#666' }}>
+                        {new Date(trade.timestampms).toLocaleTimeString()}
+                      </td>
+                      <td>{trade.modelName || trade.modelId || '-'}</td>
+                      <td style={{ padding: '12px', textAlign: 'center' }}>
+                        <span
+                          style={{
+                            padding: '4px 12px',
+                            borderRadius: '4px',
+                            fontWeight: 'bold',
+                            fontSize: '12px',
+                            backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
+                            color: trade.type === 'buy' ? '#2e7d32' : '#c62828'
+                          }}
+                        >
+                          {trade.type.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                        ${parseFloat(trade.price).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
+                        {parseFloat(trade.amount).toFixed(4)}
+                      </td>
+                      <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                        ${(parseFloat(trade.price) * parseFloat(trade.amount)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Charts */}
       <div className="charts-container">

@@ -520,25 +520,30 @@ function startTradeGeneration() {
 }
 
 // NEW: Function to auto-poll Gemini market trades and broadcast via WebSocket
+// NEW: Function to auto-poll Gemini market trades and broadcast via WebSocket
 function startGeminiTradesPolling() {
   if (geminiTradesIntervalId) {
     clearInterval(geminiTradesIntervalId);
   }
 
   geminiTradesIntervalId = setInterval(async () => {
-    try {
-      // Poll for btcusd trades (you can add more symbols if needed)
-      await axios.get('http://localhost:3001/api/gemini/market-trades', {
-        params: { symbol: 'btcusd', limit: 20 },
-        timeout: 10000,
-      });
-      console.log('🔄 Auto-polled Gemini market trades (btcusd)');
-    } catch (e) {
-      console.error('❌ Failed to poll Gemini trades:', e.message);
+    // ✅ Poll all three symbols
+    const symbols = ['btcusd', 'ethusd', 'solusd'];
+    
+    for (const symbol of symbols) {
+      try {
+        await axios.get('http://localhost:3001/api/gemini/market-trades', {
+          params: { symbol, limit: 20 },
+          timeout: 10000,
+        });
+        console.log(`🔄 Auto-polled Gemini market trades (${symbol})`);
+      } catch (e) {
+        console.error(`❌ Failed to poll Gemini trades for ${symbol}:`, e.message);
+      }
     }
   }, 5000); // Poll every 5 seconds
 
-  console.log("✅ Gemini market trades auto-polling started (every 5s)");
+  console.log("✅ Gemini market trades auto-polling started for BTC, ETH, SOL (every 5s)");
 }
 
 /* ----------------------------------------
@@ -1226,14 +1231,16 @@ io.on("connection", socket => {
 
   socket.emit("crypto_snapshot", cryptoSnapshot);
 
-  // --- NEW: Send last known Gemini trades snapshot (optional but nice) ---
-  const lastBtcTrades = geminiMarketTradesCache['btcusd'] || [];
-  if (lastBtcTrades.length > 0) {
-    socket.emit('gemini_market_trades', {
-      symbol: 'btcusd',
-      trades: lastBtcTrades,
-    });
-  }
+  // ✅ Send last known Gemini trades snapshot for ALL symbols
+  ['btcusd', 'ethusd', 'solusd'].forEach(symbol => {
+    const trades = geminiMarketTradesCache[symbol] || [];
+    if (trades.length > 0) {
+      socket.emit('gemini_market_trades', {
+        symbol,
+        trades,
+      });
+    }
+  });
 
   // Handle update speed changes from client
   socket.on("setUpdateSpeed", (newSpeed) => {

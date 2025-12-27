@@ -147,27 +147,28 @@ const placeOrder = async (orderData) => {
   };
 
   // Function to connect (save credentials and fetch initial data)
-  const connect = async (key, secret) => {
-    setLoading(true);
-    setError(null);
+  // Function to connect (save credentials and fetch initial data)
+const connect = async (key, secret, symbol = 'btcusd') => {
+  setLoading(true);
+  setError(null);
 
-    // Save to state and localStorage
-    setApiKey(key);
-    setApiSecret(secret);
-    localStorage.setItem('geminiApiKey', key);
-    localStorage.setItem('geminiApiSecret', secret);
+  // Save to state and localStorage
+  setApiKey(key);
+  setApiSecret(secret);
+  localStorage.setItem('geminiApiKey', key);
+  localStorage.setItem('geminiApiSecret', secret);
 
-    // Fetch balances to verify connection
-    const result = await fetchBalances(key, secret);
-    
-    if (result.success) {
-      // Also fetch initial market trades
-      await fetchMarketTrades();
-    }
+  // Fetch balances to verify connection
+  const result = await fetchBalances(key, secret);
+  
+  if (result.success) {
+    // Also fetch initial market trades for the specified symbol
+    await fetchMarketTrades(symbol); // ✅ NOW USES SYMBOL PARAMETER
+  }
 
-    setLoading(false);
-    return result;
-  };
+  setLoading(false);
+  return result;
+};
 
   // Function to disconnect
   const disconnect = () => {
@@ -185,7 +186,7 @@ const placeOrder = async (orderData) => {
   useEffect(() => {
     if (apiKey && apiSecret) {
       fetchBalances();
-      fetchMarketTrades();
+      fetchMarketTrades('btcusd'); // ✅ Default to BTC on initial load;
     }
   }, []);
 
