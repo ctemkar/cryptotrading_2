@@ -41,7 +41,9 @@ const AVAILABLE_SYMBOLS = [
     fetchBalances: refreshGeminiBalances,
     fetchMarketTrades: refreshGeminiMarketTrades,
     placeOrder: placeGeminiOrder,
-    setError: setGeminiError
+    setError: setGeminiError,
+    mode: geminiMode,           // ✅ 'live' | 'sandbox'
+    setMode: setGeminiMode,     // ✅
   } = useGemini();
 
   // ✅ Manual trading state
@@ -140,7 +142,7 @@ const AVAILABLE_SYMBOLS = [
   }, []);
 
   // ✅ NEW: Listen for real-time Gemini market trades
-useEffect(() => {
+/*useEffect(() => {
   const handleGeminiTrades = (payload) => {
     console.log('💎 Live Gemini trades update:', payload);
     setLiveGeminiTrades(payload.trades || []);
@@ -151,7 +153,23 @@ useEffect(() => {
   return () => {
     socket.off('gemini_market_trades', handleGeminiTrades);
   };
-}, []);
+}, []);*/
+
+useEffect(() => {
+  const handleGeminiTrades = (payload) => {
+    // Only show BTC in this table
+    if (payload.symbol !== 'btcusd') return;
+
+    console.log('💎 Live Gemini BTC trades update:', payload);
+    setLiveGeminiTrades(payload.trades || []);
+  };
+
+  socket.on('gemini_market_trades', handleGeminiTrades);
+
+  return () => {
+    socket.off('gemini_market_trades', handleGeminiTrades);
+  };
+}, [socket]);
 
   // ✅ Initialize Google Sign-In
   useEffect(() => {
@@ -653,8 +671,12 @@ useEffect(() => {
     // Choose a very small, safe amount to start with
     const amountToBuy = '0.0001'; // ~$8.93 at current BTC price
 
+    //console.log(
+    //  `[LIVE] Start Trading -> Buying ${amountToBuy} BTC on Gemini for primary model ${primaryModelName}`
+    //);
+
     console.log(
-      `[LIVE] Start Trading -> Buying ${amountToBuy} BTC on Gemini for primary model ${primaryModelName}`
+      `[${geminiMode.toUpperCase()}] Start Trading -> Buying ${amountToBuy} BTC on Gemini for primary model ${primaryModelName}`
     );
 
     const result = await placeGeminiOrder({
@@ -761,8 +783,12 @@ useEffect(() => {
       // Gemini expects a string amount with correct precision
       const amountToSell = btcAmount.toString();
 
+      //console.log(
+      //  `[LIVE] Stop Trading -> Selling ALL BTC on Gemini: ${amountToSell} BTC (btcusd) for primary model ${primaryModelName}`
+      //);
+
       console.log(
-        `[LIVE] Stop Trading -> Selling ALL BTC on Gemini: ${amountToSell} BTC (btcusd) for primary model ${primaryModelName}`
+       `[${geminiMode.toUpperCase()}] Start Trading -> Buying ${amountToBuy} BTC on Gemini for primary model ${primaryModelName}`
       );
 
       // Market order: type = 'exchange market', no price needed
@@ -1063,6 +1089,46 @@ useEffect(() => {
               Gemini Trading Account
             </h3>
 
+           {/* Mode toggle */}
+            <div style={{ marginTop: '8px', marginBottom: '10px', fontSize: '13px' }}>
+              <span style={{ marginRight: '8px', fontWeight: 'bold' }}>Environment:</span>
+              <label style={{ marginRight: '10px', cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  name="geminiEnv"
+                  value="live"
+                  checked={geminiMode === 'live'}
+                  onChange={() => {
+                    setGeminiMode('live');
+                    // Optional: refresh balances/trades when switching
+                    if (isGeminiConnected) {
+                      refreshGeminiBalances();
+                      refreshGeminiMarketTrades(selectedSymbol);
+                    }
+                  }}
+                  style={{ marginRight: '4px' }}
+                />
+                Live
+              </label>
+              <label style={{ cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  name="geminiEnv"
+                  value="sandbox"
+                  checked={geminiMode === 'sandbox'}
+                  onChange={() => {
+                    setGeminiMode('sandbox');
+                    if (isGeminiConnected) {
+                      refreshGeminiBalances();
+                      refreshGeminiMarketTrades(selectedSymbol);
+                    }
+                  }}
+                  style={{ marginRight: '4px' }}
+                />
+                Sandbox
+              </label>
+            </div> 
+
             {!isGeminiConnected ? (
               <>
                 <p style={{ margin: 0, fontSize: '14px', opacity: 0.9, marginBottom: '12px' }}>
@@ -1097,6 +1163,37 @@ useEffect(() => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
                   <span style={{ fontSize: '20px' }}>✅</span>
                   <span style={{ fontSize: '15px', fontWeight: 'bold' }}>Connected Successfully</span>
+                  {geminiMode === 'live' ? (
+                    <span
+                      style={{
+                        marginLeft: '10px',
+                        padding: '4px 12px',
+                        backgroundColor: '#e8f5e9',
+                        color: '#2e7d32',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        border: '1px solid #66bb6a',
+                      }}
+                    >
+                        🔵 LIVE
+                      </span>
+                    ) : (
+                    <span
+                      style={{
+                        marginLeft: '10px',
+                        padding: '4px 12px',
+                        backgroundColor: '#fff3e0',
+                        color: '#f57c00',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        border: '1px solid #ff9800',
+                      }}
+                    >
+                      🧪 SANDBOX
+                    </span>
+                  )}
                 </div>
                 <p style={{ margin: 0, fontSize: '13px', opacity: 0.9, marginBottom: '12px' }}>
                   Your Gemini account is connected. Viewing real balance.
@@ -1633,7 +1730,9 @@ useEffect(() => {
               fontSize: '11px',
               color: '#666'
             }}>
-              ⚠️ <strong>Warning:</strong> This will place a real order on Gemini with real money. Double-check all values before confirming.
+              ⚠️ <strong>Warning:</strong> This will place a 
+              {geminiMode === 'live' ? ' real order on Gemini with real money.' : ' test order on Gemini Sandbox (no real money).'}
+              Double-check all values before confirming.
             </div>
           </div>
         </div>

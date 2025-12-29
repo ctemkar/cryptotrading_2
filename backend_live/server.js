@@ -143,65 +143,72 @@ const geminiMarketTradesCache = {
 } */
 
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
-  const url = "https://api.gemini.com" + path;
+  // ✅ Choose base URL based on payload.env (default = live)
+  const env = payload.env === 'sandbox' ? 'sandbox' : 'live';
+  const baseUrl =
+    env === 'sandbox'
+      ? 'https://api.sandbox.gemini.com'
+      : 'https://api.gemini.com';
+
+  // Remove env from the actual Gemini payload – we only used it to choose URL
+  const { env: _ignoreEnv, ...restPayload } = payload;
+
+  const url = baseUrl + path;
   const nonce = Date.now().toString();
-  
+
   const requestPayload = {
     request: path,
     nonce,
-    ...payload
+    ...restPayload,
   };
 
-  // ✅ For /v1/balances, add account parameter
-  if (path === "/v1/balances") {
-    requestPayload.account = "primary";
+  // For balances and order/new, ensure account is present
+  if (path === '/v1/balances') {
+    requestPayload.account = requestPayload.account || 'primary';
+  }
+  if (path === '/v1/order/new') {
+    requestPayload.account = requestPayload.account || 'primary';
   }
 
-  // ✅ ALSO for /v1/order/new, add account parameter to avoid "Expected a JSON payload with accounts"
-  if (path === "/v1/order/new") {
-    requestPayload.account = requestPayload.account || "primary";
-  }
+  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString(
+    'base64'
+  );
 
-  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
-  
-  // ✅ Use apiSecret directly as string
   const signature = crypto
-    .createHmac("sha384", apiSecret)
+    .createHmac('sha384', apiSecret)
     .update(encodedPayload)
-    .digest("hex");
+    .digest('hex');
 
   const headers = {
-    "Content-Type": "text/plain",
-    "Content-Length": "0",
-    "X-GEMINI-APIKEY": apiKey,
-    "X-GEMINI-PAYLOAD": encodedPayload,
-    "X-GEMINI-SIGNATURE": signature,
-    "Cache-Control": "no-cache"
+    'Content-Type': 'text/plain',
+    'Content-Length': '0',
+    'X-GEMINI-APIKEY': apiKey,
+    'X-GEMINI-PAYLOAD': encodedPayload,
+    'X-GEMINI-SIGNATURE': signature,
+    'Cache-Control': 'no-cache',
   };
 
-  console.log("🔍 Gemini request", { path, requestPayload });
-
-  console.log("🔍 Debug - Request details:");
-  console.log("  Path:", path);
-  console.log("  API Key (first 10 chars):", apiKey.substring(0, 10) + "...");
-  console.log("  Payload:", JSON.stringify(requestPayload));
-  console.log("  Encoded Payload:", encodedPayload);
-  console.log("  Signature:", signature);
+  console.log('🔍 Gemini request', { path, env, requestPayload });
 
   const response = await axios.post(url, {}, { headers, timeout: 10000 });
   return response.data;
-} 
+}
 
 /* ------------------------------
    GEMINI PRICE HELPER
 --------------------------------*/
-async function getGeminiPrice(symbol) {
+async function getGeminiPrice(symbol, env = 'live') {
   try {
-    const url = `https://api.gemini.com/v1/pubticker/${symbol}`;
+    const baseUrl =
+      env === 'sandbox'
+        ? 'https://api.sandbox.gemini.com'
+        : 'https://api.gemini.com';
+
+    const url = `${baseUrl}/v1/pubticker/${symbol}`;
     const res = await axios.get(url, { timeout: 8000 });
     return parseFloat(res.data.last);
   } catch (error) {
-    console.error(`Failed to fetch ${symbol} price:`, error.message);
+    console.error(`Failed to fetch ${symbol} price (${env}):`, error.message);
     return null;
   }
 }
@@ -684,7 +691,8 @@ app.get("/api/trades", async (req, res) => {
 app.post("/api/gemini/balances", async (req, res) => {
   try {
     console.log("📥 Received request body:", req.body);
-    const { apiKey, apiSecret } = req.body;
+    //const { apiKey, apiSecret } = req.body;
+    const { apiKey, apiSecret, env = 'live' } = req.body; // ✅ env from frontend
 
     // Validate input
     if (!apiKey || !apiSecret) {
@@ -694,10 +702,12 @@ app.post("/api/gemini/balances", async (req, res) => {
       });
     }
 
-    console.log("🔗 Connecting to Gemini API for balances...");
+    //console.log("🔗 Connecting to Gemini API for balances...");
+    console.log("🔗 Connecting to Gemini API for balances...", { env });
     
     // Call Gemini API
-    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
+    //const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
+    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances", { env });
 
     console.log("✅ Gemini API response received");
     console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2));
@@ -715,23 +725,23 @@ app.post("/api/gemini/balances", async (req, res) => {
         shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
         hntPrice, dotPrice, ftmPrice, skyPrice
       ] = await Promise.all([
-        getGeminiPrice("btcusd"),
-        getGeminiPrice("ethusd"),
-        getGeminiPrice("solusd"),
-        getGeminiPrice("xrpusd"),
-        getGeminiPrice("avaxusd"),
-        getGeminiPrice("linkusd"),
-        getGeminiPrice("daiusd"),
-        getGeminiPrice("ampusd"),
-        getGeminiPrice("shibusd"),
-        getGeminiPrice("atomusd"),
-        getGeminiPrice("dogeusd"),
-        getGeminiPrice("polusd"),
-        getGeminiPrice("rndrusd"),
-        getGeminiPrice("hntusd"),
-        getGeminiPrice("dotusd"),
-        getGeminiPrice("ftmusd"),
-        getGeminiPrice("skyusd")
+        getGeminiPrice("btcusd", env),
+        getGeminiPrice("ethusd", env),
+        getGeminiPrice("solusd", env),
+        getGeminiPrice("xrpusd", env),
+        getGeminiPrice("avaxusd", env),
+        getGeminiPrice("linkusd", env),
+        getGeminiPrice("daiusd", env),
+        getGeminiPrice("ampusd", env),
+        getGeminiPrice("shibusd", env),
+        getGeminiPrice("atomusd", env),
+        getGeminiPrice("dogeusd", env),
+        getGeminiPrice("polusd", env),
+        getGeminiPrice("rndrusd", env),
+        getGeminiPrice("hntusd", env),
+        getGeminiPrice("dotusd", env),
+        getGeminiPrice("ftmusd", env),
+        getGeminiPrice("skyusd", env)
       ]);
 
     //console.log("💵 Real Gemini prices:", { btcPrice, ethPrice, solPrice });
@@ -913,17 +923,28 @@ app.post("/api/gemini/balances", async (req, res) => {
 -----------------------------------------*/
 app.get("/api/gemini/market-trades", async (req, res) => {
   try {
-    const { symbol = 'btcusd', limit = 20 } = req.query;
+    //const { symbol = 'btcusd', limit = 20 } = req.query;
+    const { symbol = 'btcusd', limit = 20, env = 'live' } = req.query;
 
     console.log(`🔗 Fetching market trades for ${symbol}...`);
 
     // Public endpoint - no authentication required
-    const response = await axios.get(
+    /*const response = await axios.get(
       `https://api.gemini.com/v1/trades/${symbol}`,
       {
         params: { limit_trades: limit },
         timeout: 10000
       }
+    );*/
+
+    const baseUrl =
+      env === 'sandbox'
+        ? 'https://api.sandbox.gemini.com'
+        : 'https://api.gemini.com';
+
+    const response = await axios.get(
+      `${baseUrl}/v1/trades/${symbol}`,
+      { params: { limit_trades: limit }, timeout: 10000 }
     );
 
     const trades = response.data || [];
@@ -1076,6 +1097,7 @@ app.post("/api/gemini/order", async (req, res) => {
       modelId,
       modelName,
       closePosition, // boolean: true when called from "Stop Trading"
+      env = 'live',        // ✅ ADD THIS
     } = req.body;
 
     // Validate input
@@ -1139,7 +1161,11 @@ app.post("/api/gemini/order", async (req, res) => {
     };
 
     // Call Gemini API to place order
-    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", orderPayload);
+    //const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", orderPayload);
+    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", {
+  ...orderPayload,
+  env, // ✅ pass through env
+});
 
     console.log("✅ [LIVE] Order placed on Gemini:", order.order_id);
 
@@ -1262,7 +1288,7 @@ async function startServer() {
   
   // Start the update intervals
   startUpdateInterval();
-  startTradeGeneration();
+  //startTradeGeneration();
   startGeminiTradesPolling(); // NEW: auto-poll Gemini trades every 5s
 
   server.listen(3001, () => {
