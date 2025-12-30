@@ -145,6 +145,7 @@ const geminiMarketTradesCache = {
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   // ✅ Choose base URL based on payload.env (default = live)
   const env = payload.env === 'sandbox' ? 'sandbox' : 'live';
+  
   const baseUrl =
     env === 'sandbox'
       ? 'https://api.sandbox.gemini.com'
@@ -236,6 +237,11 @@ function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price }) {
     openedAt: Date.now(),
   };
   console.log('📌 [LIVE] Opened Gemini position:', liveGeminiPositions[key]);
+
+  // ✅ NEW: notify all clients that a position was opened
+  io.emit('position_opened', {
+    ...liveGeminiPositions[key],
+  });
 }
 
 async function closeLiveGeminiPositionAndRecord({
@@ -302,6 +308,23 @@ async function closeLiveGeminiPositionAndRecord({
     timestamp,
   };
 }
+
+// ✅ NEW: API to get all current live Gemini positions (per model & symbol)
+app.get('/api/gemini/open-positions', (req, res) => {
+  try {
+    const positions = Object.values(liveGeminiPositions);
+    return res.json({
+      success: true,
+      positions,
+    });
+  } catch (err) {
+    console.error('❌ Error getting open positions:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to get open positions',
+    });
+  }
+});
 
 /* ------------------------------
    MODELS INITIAL STATE

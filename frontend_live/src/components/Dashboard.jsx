@@ -29,6 +29,15 @@ const AVAILABLE_SYMBOLS = [
   // ✅ NEW: Live Gemini market trades from WebSocket
   const [liveGeminiTrades, setLiveGeminiTrades] = useState([]);
 
+  // ✅ Real Gemini positions (per model & symbol)
+const [openPositions, setOpenPositions] = useState([]);
+const [loadingPositions, setLoadingPositions] = useState(false);
+
+// ✅ Live Gemini market trades per symbol
+const [btcTrades, setBtcTrades] = useState([]);
+const [ethTrades, setEthTrades] = useState([]);
+const [solTrades, setSolTrades] = useState([]);
+
   // ✅ useGemini hook for enhanced Gemini integration
   const {
     balances: geminiBalances,
@@ -42,8 +51,8 @@ const AVAILABLE_SYMBOLS = [
     fetchMarketTrades: refreshGeminiMarketTrades,
     placeOrder: placeGeminiOrder,
     setError: setGeminiError,
-    mode: geminiMode,           // ✅ 'live' | 'sandbox'
-    setMode: setGeminiMode,     // ✅
+    //mode: geminiMode,           // ✅ 'live' | 'sandbox'
+    //setMode: setGeminiMode,     // ✅
   } = useGemini();
 
   // ✅ Manual trading state
@@ -157,19 +166,86 @@ const AVAILABLE_SYMBOLS = [
 
 useEffect(() => {
   const handleGeminiTrades = (payload) => {
-    // Only show BTC in this table
-    if (payload.symbol !== 'btcusd') return;
+    if (!payload) return;
+    const { symbol, trades } = payload;
+    console.log('💎 Live Gemini trades update:', symbol, trades?.length);
 
-    console.log('💎 Live Gemini BTC trades update:', payload);
-    setLiveGeminiTrades(payload.trades || []);
+    switch (symbol) {
+      case 'btcusd':
+        setBtcTrades(trades || []);
+        break;
+      case 'ethusd':
+        setEthTrades(trades || []);
+        break;
+      case 'solusd':
+        setSolTrades(trades || []);
+        break;
+      default:
+        break;
+    }
   };
 
   socket.on('gemini_market_trades', handleGeminiTrades);
-
   return () => {
     socket.off('gemini_market_trades', handleGeminiTrades);
   };
 }, [socket]);
+
+useEffect(() => {
+  if (!isGeminiConnected) {
+    setOpenPositions([]);
+    return;
+  }
+
+  const fetchPositions = async () => {
+    try {
+      setLoadingPositions(true);
+      const res = await fetch('/api/gemini/open-positions');
+      const data = await res.json();
+      if (!data.success) {
+        console.error('Error fetching open positions:', data.error);
+        return;
+      }
+      setOpenPositions(data.positions || []);
+    } catch (err) {
+      console.error('Error fetching open positions:', err.message);
+    } finally {
+      setLoadingPositions(false);
+    }
+  };
+
+  // initial + every 5s
+  fetchPositions();
+  const id = setInterval(fetchPositions, 5000);
+  return () => clearInterval(id);
+}, [isGeminiConnected]);
+
+useEffect(() => {
+  const onOpened = (pos) => {
+    setOpenPositions((prev) => {
+      const key = `${pos.modelId}_${pos.symbol}`;
+      const without = prev.filter(
+        (p) => `${p.modelId}_${p.symbol}` !== key
+      );
+      return [...without, pos];
+    });
+  };
+
+  const onClosed = (payload) => {
+    const key = `${payload.model_id}_${payload.symbol.toLowerCase()}`;
+    setOpenPositions((prev) =>
+      prev.filter((p) => `${p.modelId}_${p.symbol}` !== key)
+    );
+  };
+
+  socket.on('position_opened', onOpened);
+  socket.on('position_closed', onClosed);
+
+  return () => {
+    socket.off('position_opened', onOpened);
+    socket.off('position_closed', onClosed);
+  };
+}, []);
 
   // ✅ Initialize Google Sign-In
   useEffect(() => {
@@ -1090,44 +1166,7 @@ useEffect(() => {
             </h3>
 
            {/* Mode toggle */}
-            <div style={{ marginTop: '8px', marginBottom: '10px', fontSize: '13px' }}>
-              <span style={{ marginRight: '8px', fontWeight: 'bold' }}>Environment:</span>
-              <label style={{ marginRight: '10px', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="geminiEnv"
-                  value="live"
-                  checked={geminiMode === 'live'}
-                  onChange={() => {
-                    setGeminiMode('live');
-                    // Optional: refresh balances/trades when switching
-                    if (isGeminiConnected) {
-                      refreshGeminiBalances();
-                      refreshGeminiMarketTrades(selectedSymbol);
-                    }
-                  }}
-                  style={{ marginRight: '4px' }}
-                />
-                Live
-              </label>
-              <label style={{ cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="geminiEnv"
-                  value="sandbox"
-                  checked={geminiMode === 'sandbox'}
-                  onChange={() => {
-                    setGeminiMode('sandbox');
-                    if (isGeminiConnected) {
-                      refreshGeminiBalances();
-                      refreshGeminiMarketTrades(selectedSymbol);
-                    }
-                  }}
-                  style={{ marginRight: '4px' }}
-                />
-                Sandbox
-              </label>
-            </div> 
+           
 
             {!isGeminiConnected ? (
               <>
@@ -1160,41 +1199,6 @@ useEffect(() => {
               </>
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-                  <span style={{ fontSize: '20px' }}>✅</span>
-                  <span style={{ fontSize: '15px', fontWeight: 'bold' }}>Connected Successfully</span>
-                  {geminiMode === 'live' ? (
-                    <span
-                      style={{
-                        marginLeft: '10px',
-                        padding: '4px 12px',
-                        backgroundColor: '#e8f5e9',
-                        color: '#2e7d32',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        fontWeight: 'bold',
-                        border: '1px solid #66bb6a',
-                      }}
-                    >
-                        🔵 LIVE
-                      </span>
-                    ) : (
-                    <span
-                      style={{
-                        marginLeft: '10px',
-                        padding: '4px 12px',
-                        backgroundColor: '#fff3e0',
-                        color: '#f57c00',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        fontWeight: 'bold',
-                        border: '1px solid #ff9800',
-                      }}
-                    >
-                      🧪 SANDBOX
-                    </span>
-                  )}
-                </div>
                 <p style={{ margin: 0, fontSize: '13px', opacity: 0.9, marginBottom: '12px' }}>
                   Your Gemini account is connected. Viewing real balance.
                 </p>
@@ -2487,101 +2491,151 @@ useEffect(() => {
         )}
       </div>
 
+      {/* ✅ My Real Gemini Positions */}
+        {isGeminiConnected && (
+          <div
+            style={{
+              background: '#ffffff',
+              padding: '20px',
+              borderRadius: '8px',
+              marginBottom: '20px',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+            }}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: '15px' }}>📌 My Real Gemini Positions</h2>
+
+            {loadingPositions ? (
+              <div style={{ textAlign: 'center', padding: '30px', color: '#666' }}>
+                Loading positions…
+              </div>
+            ) : openPositions.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '30px', color: '#666', fontStyle: 'italic' }}>
+                No open positions. Start trading to open a position.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table
+                  style={{
+                    width: '100%',
+                    borderCollapse: 'collapse',
+                    fontSize: '14px',
+                  }}
+                >
+                  <thead>
+                    <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
+                      <th style={{ padding: '10px', textAlign: 'left' }}>Model</th>
+                      <th style={{ padding: '10px', textAlign: 'left' }}>Symbol</th>
+                      <th style={{ padding: '10px', textAlign: 'left' }}>Side</th>
+                      <th style={{ padding: '10px', textAlign: 'right' }}>Entry Price</th>
+                      <th style={{ padding: '10px', textAlign: 'right' }}>Amount</th>
+                      <th style={{ padding: '10px', textAlign: 'left' }}>Opened At</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {openPositions.map((p, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
+                        <td style={{ padding: '10px', fontWeight: 'bold' }}>
+                          {p.modelName || p.modelId}
+                        </td>
+                        <td style={{ padding: '10px' }}>{p.symbol?.toUpperCase()}</td>
+                        <td style={{ padding: '10px' }}>{p.side}</td>
+                        <td style={{ padding: '10px', textAlign: 'right', fontFamily: 'monospace' }}>
+                          ${Number(p.entryPrice).toLocaleString()}
+                        </td>
+                        <td style={{ padding: '10px', textAlign: 'right', fontFamily: 'monospace' }}>
+                          {Number(p.amount)}
+                        </td>
+                        <td style={{ padding: '10px', color: '#666' }}>
+                          {p.openedAt
+                            ? new Date(p.openedAt).toLocaleTimeString()
+                            : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )} 
+
       {/* ✅ Last 20 Market Trades from Gemini */}
-      {isGeminiConnected && (
+      <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
+      ...
+      <div style={{ overflowX: 'auto' }}>
         <div
           style={{
-            background: '#ffffff',
-            padding: '20px',
-            borderRadius: '8px',
-            marginBottom: '20px',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: '16px',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button
-                onClick={() => refreshGeminiMarketTrades(selectedSymbol)}
+          {[
+            { title: 'BTCUSD', trades: btcTrades },
+            { title: 'ETHUSD', trades: ethTrades },
+            { title: 'SOLUSD', trades: solTrades },
+          ].map(({ title, trades }) => (
+            <div key={title} style={{ border: '1px solid #eee', borderRadius: '6px' }}>
+              <div
                 style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#667eea',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '13px',
+                  padding: '8px 12px',
+                  borderBottom: '1px solid #eee',
                   fontWeight: 'bold',
-                  cursor: 'pointer'
                 }}
               >
-                🔄 Refresh
-              </button>
-              
-            </div>
-          </div>
-
-          {geminiLoading ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
-              Loading market trades...
-            </div>
-          ) : (liveGeminiTrades.length === 0 && geminiMarketTrades.length === 0) ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#666', fontStyle: 'italic' }}>
-              No market trades available
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+                {title}
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                 <thead>
-                  <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
-                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Time</th>
-                    <th style={{ padding: '12px', textAlign: 'left', fontWeight: 'bold' }}>Model</th>
-                    <th style={{ padding: '12px', textAlign: 'center', fontWeight: 'bold' }}>Type</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Price</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Amount</th>
-                    <th style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold' }}>Total</th>
+                  <tr style={{ backgroundColor: '#fafafa' }}>
+                    <th style={{ padding: '6px', textAlign: 'left' }}>Time</th>
+                    <th style={{ padding: '6px', textAlign: 'center' }}>Type</th>
+                    <th style={{ padding: '6px', textAlign: 'right' }}>Price</th>
+                    <th style={{ padding: '6px', textAlign: 'right' }}>Amount</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(liveGeminiTrades.length > 0 ? liveGeminiTrades : geminiMarketTrades).map((trade, index) => (
-                    <tr
-                      key={trade.tid || index}
-                      style={{ borderBottom: '1px solid #eee' }}
-                    >
-                      <td style={{ padding: '12px', color: '#666' }}>
-                        {new Date(trade.timestampms).toLocaleTimeString()}
-                      </td>
-                      <td>{trade.modelName || trade.modelId || '-'}</td>
-                      <td style={{ padding: '12px', textAlign: 'center' }}>
-                        <span
-                          style={{
-                            padding: '4px 12px',
-                            borderRadius: '4px',
-                            fontWeight: 'bold',
-                            fontSize: '12px',
-                            backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
-                            color: trade.type === 'buy' ? '#2e7d32' : '#c62828'
-                          }}
-                        >
-                          {trade.type.toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
-                        ${parseFloat(trade.price).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontFamily: 'monospace' }}>
-                        {parseFloat(trade.amount).toFixed(4)}
-                      </td>
-                      <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
-                        ${(parseFloat(trade.price) * parseFloat(trade.amount)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {trades && trades.length > 0 ? (
+                    trades.map((trade, index) => (
+                      <tr key={trade.tid || index} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                        <td style={{ padding: '6px', color: '#666' }}>
+                          {new Date(trade.timestampms).toLocaleTimeString()}
+                        </td>
+                        <td style={{ padding: '6px', textAlign: 'center' }}>
+                          <span
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              fontWeight: 'bold',
+                              backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
+                              color: trade.type === 'buy' ? '#2e7d32' : '#c62828',
+                            }}
+                          >
+                            {trade.type.toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
+                          ${parseFloat(trade.price).toLocaleString()}
+                        </td>
+                        <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
+                          {parseFloat(trade.amount).toFixed(4)}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} style={{ padding: '8px', textAlign: 'center', color: '#999' }}>
+                        No trades yet
                       </td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>
-          )}
+          ))}
         </div>
-      )}
+      </div>
 
       {/* Charts */}
       <div className="charts-container">

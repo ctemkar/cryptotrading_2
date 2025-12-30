@@ -13,14 +13,14 @@ export function useGemini() {
   const [apiSecret, setApiSecret] = useState(() => localStorage.getItem('geminiApiSecret') || '');
 
   // ✅ LIVE / SANDBOX mode
-  const [mode, setMode] = useState(() => {
-    return localStorage.getItem('geminiMode') || 'live'; // 'live' | 'sandbox'
-  });
+  //const [mode, setMode] = useState(() => {
+  //  return localStorage.getItem('geminiMode') || 'live'; // 'live' | 'sandbox'
+  //});
 
   // ✅ Persist mode whenever it changes
-  useEffect(() => {
-    localStorage.setItem('geminiMode', mode);
-  }, [mode]);
+  //useEffect(() => {
+  //  localStorage.setItem('geminiMode', mode);
+  //}, [mode]);
 
   // Function to fetch balances
   /*const fetchBalances = async (key, secret) => {
@@ -50,14 +50,14 @@ export function useGemini() {
   };*/
 
   const fetchBalances = async (key, secret) => {
-    console.log('🔧 fetchBalances env mode =', mode);
+   //console.log('🔧 fetchBalances env mode =', live);
   try {
     const response = await axios.post(
       '/api/gemini/balances',
       {
         apiKey: key || apiKey,
         apiSecret: secret || apiSecret,
-        env: mode, // ✅ live or sandbox
+        env: 'live', // ✅ live or sandbox
       },
       {
         headers: {
@@ -87,7 +87,7 @@ export function useGemini() {
   const fetchMarketTrades = async (symbol = 'btcusd', limit = 20) => {
     try {
       const response = await axios.get('/api/gemini/market-trades', {
-        params: { symbol, limit, env: mode }
+        params: { symbol, limit, env: 'live' }
       }); 
 
       if (response.data.success) {
@@ -138,7 +138,7 @@ const placeOrder = async (orderData) => {
       const response = await axios.post('/api/gemini/order', {
         apiKey,
         apiSecret,
-        env: mode,   // ✅ live or sandbox
+        env: 'live',   // ✅ live or sandbox
         ...orderData,   // <-- passes modelId, modelName, closePosition, type, etc.
       });
 
@@ -215,7 +215,7 @@ const connect = async (key, secret, symbol = 'btcusd') => {
     fetchMarketTrades,
     placeOrder,
     setError,
-    mode,      // expose current mode
-    setMode,   // expose setter for Dashboard
+   //mode,      // expose current mode
+    //setMode,   // expose setter for Dashboard
   };
 }
