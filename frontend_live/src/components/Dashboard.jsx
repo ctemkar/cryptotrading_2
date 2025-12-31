@@ -30,7 +30,7 @@ const AVAILABLE_SYMBOLS = [
   const [liveGeminiTrades, setLiveGeminiTrades] = useState([]);
 
   // ✅ Real Gemini positions (per model & symbol)
-const [openPositions, setOpenPositions] = useState([]);
+//const [openPositions, setOpenPositions] = useState([]);
 const [loadingPositions, setLoadingPositions] = useState(false);
 
 // ✅ Live Gemini market trades per symbol
@@ -38,10 +38,20 @@ const [btcTrades, setBtcTrades] = useState([]);
 const [ethTrades, setEthTrades] = useState([]);
 const [solTrades, setSolTrades] = useState([]);
 
+const [geminiBalance, setGeminiBalance] = useState({
+  btc: 0,
+  eth: 0,
+  sol: 0,
+  usdc: 0,
+  other: [],
+  totalUsd: 0,
+});
+
   // ✅ useGemini hook for enhanced Gemini integration
   const {
     balances: geminiBalances,
     marketTrades: geminiMarketTrades,
+    openPositions,                          // ✅ ADD THIS (it's in useGemini now)
     loading: geminiLoading,
     error: geminiError,
     isConnected: isGeminiConnected,
@@ -49,6 +59,7 @@ const [solTrades, setSolTrades] = useState([]);
     disconnect: disconnectGemini,
     fetchBalances: refreshGeminiBalances,
     fetchMarketTrades: refreshGeminiMarketTrades,
+    fetchOpenPositions,                     // ✅ ADD THIS TOO
     placeOrder: placeGeminiOrder,
     setError: setGeminiError,
     //mode: geminiMode,           // ✅ 'live' | 'sandbox'
@@ -113,6 +124,461 @@ const [solTrades, setSolTrades] = useState([]);
   const availableModels = Object.values(modelsLatest);
   const startValue = parseFloat(startingValue) || 1000;
   const currentPrice = cryptoLatest.BTCUSDT || null;
+
+  // ========================================
+// 🚀 GEMINI LIVE TRADING HANDLERS - ADD HERE
+// ========================================
+
+/**
+ * Get current price for a symbol
+ */
+const getCurrentPrice = (symbol) => {
+  const sym = symbol.toLowerCase();
+  if (sym === 'btcusd') {
+    return cryptoLatest.BTCUSDT;
+  } else if (sym === 'ethusd') {
+    return cryptoLatest.ETHUSDT;
+  } else if (sym === 'solusd') {
+    return cryptoLatest.SOLUSDT;
+  }
+  return null;
+};
+
+/**
+ * Start Gemini Live Trading for a specific model
+ */
+const handleStartGeminiTrading = async (model) => {
+  if (!isGeminiConnected) {
+    alert('Please connect to Gemini first');
+    return;
+  }
+
+  const symbol = selectedSymbol || 'btcusd';
+  const currentPrice = getCurrentPrice(symbol);
+
+  if (!currentPrice || currentPrice <= 0) {
+    alert('Price not available yet');
+    return;
+  }
+
+  /**
+ * Fetch open Gemini positions from backend
+ */
+const fetchOpenPositions = async () => {
+  if (!isGeminiConnected) {
+    setOpenPositions([]);
+    return;
+  }
+
+  try {
+    setLoadingPositions(true);
+    const res = await fetch('/api/gemini/open-positions');
+    const data = await res.json();
+    
+    if (!data.success) {
+      console.error('Error fetching open positions:', data.error);
+      return;
+    }
+    
+    setOpenPositions(data.positions || []);
+  } catch (err) {
+    console.error('Error fetching open positions:', err.message);
+  } finally {
+    setLoadingPositions(false);
+  }
+};
+
+  // Check for existing position
+  const existingPosition = openPositions.find(
+    (p) =>
+      p.modelId === model.id &&
+      p.symbol.toLowerCase() === symbol.toLowerCase()
+  );
+
+  if (existingPosition) {
+    alert(`${model.name} already has an open position for ${symbol.toUpperCase()}`);
+    return;
+  }
+
+  // Define position size
+  let amount;
+  if (symbol.toLowerCase() === 'btcusd') {
+    amount = 0.001;
+  } else if (symbol.toLowerCase() === 'ethusd') {
+    amount = 0.01;
+  } else if (symbol.toLowerCase() === 'solusd') {
+    amount = 0.1;
+  } else {
+    amount = 0.001;
+  }
+
+  const confirmed = window.confirm(
+    `Start Gemini Live Trading?\n\n` +
+    `Model: ${model.name}\n` +
+    `Symbol: ${symbol.toUpperCase()}\n` +
+    `Side: BUY (Long)\n` +
+    `Amount: ${amount}\n` +
+    `Price: $${currentPrice.toFixed(2)}\n` +
+    `Total: $${(amount * currentPrice).toFixed(2)}\n\n` +
+    `This will place a REAL order on Gemini.`
+  );
+
+  if (!confirmed) return;
+
+  try {
+    console.log(`🚀 Starting Gemini trading for ${model.name} on ${symbol}`);
+
+    const result = await placeGeminiOrder({
+      symbol,
+      side: 'buy',
+      amount: amount.toString(),
+      price: currentPrice.toString(),
+      type: 'exchange limit',
+      modelId: model.id,
+      modelName: model.name,
+      closePosition: false,
+    });
+
+    if (result.success) {
+      alert(
+        `✅ Gemini BUY order placed!\n\n` +
+        `Model: ${model.name}\n` +
+        `Symbol: ${symbol.toUpperCase()}\n` +
+        `Amount: ${amount}\n` +
+        `Price: $${currentPrice.toFixed(2)}`
+      );
+      
+      await fetchOpenPositions();
+    } else {
+      alert(`❌ Failed to place order:\n${result.error}`);
+    }
+  } catch (error) {
+    console.error('❌ Error starting Gemini trading:', error);
+    alert(`Error: ${error.message}`);
+  }
+};
+
+/**
+ * Stop Gemini Live Trading for a specific model
+ */
+const handleStopGeminiTrading = async (model) => {
+  if (!isGeminiConnected) {
+    alert('Gemini is not connected');
+    return;
+  }
+
+  const symbol = selectedSymbol || 'btcusd';
+
+  const position = openPositions.find(
+    (p) =>
+      p.modelId === model.id &&
+      p.symbol.toLowerCase() === symbol.toLowerCase()
+  );
+
+  if (!position) {
+    alert(`No open position found for ${model.name} on ${symbol.toUpperCase()}`);
+    return;
+  }
+
+  const currentPrice = getCurrentPrice(symbol);
+
+  if (!currentPrice || currentPrice <= 0) {
+    alert('Price not available yet');
+    return;
+  }
+
+  const entryPrice = position.entryPrice;
+  const amount = position.amount;
+  const entryValue = amount * entryPrice;
+  const exitValue = amount * currentPrice;
+  const estimatedPnL = exitValue - entryValue;
+  const estimatedPnLPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+
+  const confirmed = window.confirm(
+    `Stop Gemini Live Trading?\n\n` +
+    `Model: ${model.name}\n` +
+    `Symbol: ${symbol.toUpperCase()}\n` +
+    `Side: SELL (Close Long)\n` +
+    `Amount: ${amount}\n` +
+    `Entry Price: $${entryPrice.toFixed(2)}\n` +
+    `Current Price: $${currentPrice.toFixed(2)}\n` +
+    `Estimated P&L: $${estimatedPnL.toFixed(2)} (${estimatedPnLPercent.toFixed(2)}%)\n\n` +
+    `This will place a REAL SELL order on Gemini.`
+  );
+
+  if (!confirmed) return;
+
+  try {
+    console.log(`🛑 Stopping Gemini trading for ${model.name} on ${symbol}`);
+
+    const result = await placeGeminiOrder({
+      symbol,
+      side: 'sell',
+      amount: amount.toString(),
+      price: currentPrice.toString(),
+      type: 'exchange limit',
+      modelId: model.id,
+      modelName: model.name,
+      closePosition: true,
+    });
+
+    if (result.success) {
+      const actualPnL = result.positionClose?.pnl || estimatedPnL;
+      const actualPnLPercent = result.positionClose?.pnlPercent || estimatedPnLPercent;
+
+      alert(
+        `✅ Gemini SELL order placed & position closed!\n\n` +
+        `Model: ${model.name}\n` +
+        `Symbol: ${symbol.toUpperCase()}\n` +
+        `Entry: $${entryPrice.toFixed(2)}\n` +
+        `Exit: $${currentPrice.toFixed(2)}\n` +
+        `P&L: $${actualPnL.toFixed(2)} (${actualPnLPercent.toFixed(2)}%)`
+      );
+
+      await fetchOpenPositions();
+      await refreshGeminiBalances();
+    } else {
+      alert(`❌ Failed to close position:\n${result.error}`);
+    }
+  } catch (error) {
+    console.error('❌ Error stopping Gemini trading:', error);
+    alert(`Error: ${error.message}`);
+  }
+};
+
+// In Dashboard.jsx, above handleStopAllGeminiTrading
+const getAvailableBalance = (currencyCode) => {
+  // If geminiBalances is null or undefined, return 0
+  if (!geminiBalances) return 0;
+
+  const code = currencyCode.toLowerCase(); // e.g., 'btc'
+  
+  // Since your console shows geminiBalances is an object like { btc: 0.0002... }
+  const value = geminiBalances[code];
+
+  // Convert to number and ensure it's valid
+  const numValue = Number(value);
+  return Number.isFinite(numValue) ? numValue : 0;
+};
+
+/**
+ * Stop ALL Gemini Live Trading
+ */
+const handleStopAllGeminiTrading = async () => {
+  if (!isGeminiConnected) {
+    alert('Gemini is not connected');
+    return;
+  }
+
+  if (!openPositions || openPositions.length === 0) {
+    alert('No open positions to close');
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Close ALL ${openPositions.length} open Gemini positions?\n\n` +
+    `This will place REAL SELL orders for:\n` +
+    openPositions.map(p => `• ${p.modelName} - ${p.symbol.toUpperCase()} (${p.amount})`).join('\n') +
+    `\n\nThis action cannot be undone.`
+  );
+
+  if (!confirmed) return;
+
+  console.log('🛑 Starting to close all Gemini positions...', openPositions);
+
+  // ✅ Step 1: Refresh balances to get actual available amounts
+  try {
+    await refreshGeminiBalances();
+    console.log('✅ Refreshed Gemini raw balances:', geminiBalances);
+  } catch (err) {
+    console.error('❌ Failed to refresh balances:', err);
+    alert('Failed to refresh balances. Please try again.');
+    return;
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+  const errors = [];
+
+  for (const position of openPositions) {
+    try {
+      const symbol = position.symbol.toLowerCase();      // e.g. 'btcusd'
+      const currency = symbol.replace('usd', '');        // 'btcusd' -> 'btc'
+
+      console.log(`\n🔍 Processing position:`, {
+        model: position.modelName,
+        symbol,
+        positionAmount: position.amount,
+        entryPrice: position.entryPrice
+      });
+
+      // ✅ Step 2: Get actual available balance from Gemini
+      const availableBalance = getAvailableBalance(currency);
+
+      console.log('🔎 Balance Check:', {
+        currency,
+        availableFromHelper: availableBalance,
+        rawObject: geminiBalances
+      });
+      
+      console.log('🔎 Balance + position info:', {
+        symbol,
+        currency,
+        availableBalance,
+        positionAmount: position.amount,
+      });
+
+      if (availableBalance <= 0) {
+        console.warn(`⚠️ Skipping ${symbol}: No balance available to sell`);
+        errors.push({
+          model: position.modelName,
+          symbol,
+          reason: 'No balance available',
+          details: `Available: ${availableBalance} ${currency.toUpperCase()}`
+        });
+        failCount++;
+        continue;
+      }
+
+      // ✅ Step 3: Sell the smaller of (position amount) vs (actual balance)
+      let amountToSell = Math.min(Number(position.amount), availableBalance);
+
+      // ✅ Apply a small safety margin to avoid "insufficient funds"
+      amountToSell = amountToSell * 0.995; // sell 99.5% of that
+
+      // ✅ Step 4: Apply Gemini's precision rules
+      if (currency === 'btc') {
+        amountToSell = Number(amountToSell.toFixed(8));
+      } else if (currency === 'eth') {
+        amountToSell = Number(amountToSell.toFixed(6));
+      } else if (currency === 'sol') {
+        amountToSell = Number(amountToSell.toFixed(6));
+      }
+
+      console.log('📏 Amount to sell after safety margin + rounding:', {
+        currency,
+        amountToSell,
+        availableBalance,
+        positionAmount: position.amount,
+      });
+
+      // ✅ Step 5: Check minimum order size
+      const minOrderSize = {
+        btc: 0.00001,
+        eth: 0.001,
+        sol: 0.01
+      };
+
+      if (amountToSell < (minOrderSize[currency] || 0)) {
+        console.warn(`⚠️ Amount too small to sell: ${amountToSell} ${currency.toUpperCase()}`);
+        errors.push({
+          model: position.modelName,
+          symbol,
+          reason: 'Amount below minimum',
+          details: `Trying to sell ${amountToSell}, minimum is ${minOrderSize[currency]}`
+        });
+        failCount++;
+        continue;
+      }
+
+      // ✅ Step 6: Get current market price
+      const currentPrice = getCurrentPrice(position.symbol);
+
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn(`❌ Price not available for ${position.symbol}`);
+        errors.push({
+          model: position.modelName,
+          symbol: position.symbol,
+          reason: 'Price not available',
+          details: `Current price: ${currentPrice}`
+        });
+        failCount++;
+        continue;
+      }
+
+      const roundedPrice = Number(currentPrice.toFixed(2));
+
+      console.log(`📤 Placing SELL order:`, {
+        symbol: position.symbol,
+        amount: amountToSell,
+        price: roundedPrice,
+        model: position.modelName
+      });
+
+      // ✅ Step 7: Place the sell order
+      const result = await placeGeminiOrder({
+        symbol: position.symbol,
+        side: 'sell',
+        amount: amountToSell.toString(),
+        price: roundedPrice.toString(),
+        type: 'exchange limit',
+        modelId: position.modelId,
+        modelName: position.modelName,
+        closePosition: true,
+      });
+
+      if (result.success) {
+        successCount++;
+        console.log(`✅ Successfully closed: ${position.modelName} - ${position.symbol}`);
+      } else {
+        failCount++;
+        console.error(`❌ Failed to close: ${position.modelName} - ${position.symbol}`, result.error);
+        errors.push({
+          model: position.modelName,
+          symbol: position.symbol,
+          reason: result.error || 'Unknown error',
+          details: result.details || null
+        });
+      }
+
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+    } catch (error) {
+      failCount++;
+      console.error(`❌ Exception while closing position:`, {
+        model: position.modelName,
+        symbol: position.symbol,
+        error: error.message,
+        stack: error.stack
+      });
+      
+      errors.push({
+        model: position.modelName,
+        symbol: position.symbol,
+        reason: error.message || 'Exception thrown',
+        details: error.response?.data || null
+      });
+    }
+  }
+
+  console.log('\n📊 Final Results:', {
+    success: successCount,
+    failed: failCount,
+    errors: errors
+  });
+
+  let alertMsg = `Closed ${successCount} position(s)\n`;
+  
+  if (failCount > 0) {
+    alertMsg += `Failed to close ${failCount} position(s)\n\n`;
+    alertMsg += 'Reasons:\n';
+    alertMsg += errors.map(e => {
+      const geminiReason = e.details?.reason || e.details?.message || e.reason;
+      return `• ${e.model} ${e.symbol.toUpperCase()}: ${geminiReason}`;
+    }).join('\n');
+  }
+
+  alert(alertMsg);
+
+  // ✅ Step 9: Refresh UI
+  await fetchOpenPositions();
+  await refreshGeminiBalances();
+};
+
+// ========================================
+// END OF GEMINI HANDLERS
+// ========================================
 
   // Speed presets
   const speedPresets = [
@@ -191,7 +657,7 @@ useEffect(() => {
   };
 }, [socket]);
 
-useEffect(() => {
+/*useEffect(() => {
   if (!isGeminiConnected) {
     setOpenPositions([]);
     return;
@@ -218,24 +684,17 @@ useEffect(() => {
   fetchPositions();
   const id = setInterval(fetchPositions, 5000);
   return () => clearInterval(id);
-}, [isGeminiConnected]);
+}, [isGeminiConnected]); */
 
 useEffect(() => {
   const onOpened = (pos) => {
-    setOpenPositions((prev) => {
-      const key = `${pos.modelId}_${pos.symbol}`;
-      const without = prev.filter(
-        (p) => `${p.modelId}_${p.symbol}` !== key
-      );
-      return [...without, pos];
-    });
+    console.log('🟢 Position opened:', pos);
+    fetchOpenPositions(); // refresh from backend
   };
 
   const onClosed = (payload) => {
-    const key = `${payload.model_id}_${payload.symbol.toLowerCase()}`;
-    setOpenPositions((prev) =>
-      prev.filter((p) => `${p.modelId}_${p.symbol}` !== key)
-    );
+    console.log('🔴 Position closed:', payload);
+    fetchOpenPositions(); // refresh from backend
   };
 
   socket.on('position_opened', onOpened);
@@ -689,7 +1148,7 @@ useEffect(() => {
     setFinalProfitLoss(null);
   };*/
 
-  const handleStartTrading = async () => {
+  /*const handleStartTrading = async () => {
   if (selectedModels.length === 0) {
     alert('Please select at least one model to trade');
     return;
@@ -782,6 +1241,63 @@ useEffect(() => {
       err.message || 'Error while placing initial BUY on Gemini when starting trading'
     );
   }
+}; */
+
+const handleStartTrading = async () => {
+  if (selectedModels.length === 0) {
+    alert('Please select at least one model to trade');
+    return;
+  }
+
+  const sv = parseFloat(startingValue);
+  if (!sv || sv <= 0) {
+    alert('Please enter a valid starting value (must be greater than 0)');
+    return;
+  }
+
+  if (!stopLoss && !profitTarget) {
+    alert('Please enter at least one value (Stop Loss or Profit Target)');
+    return;
+  }
+
+  const stopLossValue = parseFloat(stopLoss);
+  const profitTargetValue = parseFloat(profitTarget);
+
+  if (stopLoss && (isNaN(stopLossValue) || stopLossValue <= 0)) {
+    alert('Please enter a valid Stop Loss value (must be greater than 0)');
+    return;
+  }
+
+  if (profitTarget && (isNaN(profitTargetValue) || profitTargetValue <= 0)) {
+    alert('Please enter a valid Profit Target value (must be greater than 0)');
+    return;
+  }
+
+  // Simulator init
+  const initVals = {};
+  Object.keys(modelsLatest).forEach((id) => {
+    const m = modelsLatest[id];
+    initVals[id] = m?.accountValue || sv;
+  });
+  setInitialValues(initVals);
+
+  setIsTrading(true);
+  setTradingStopped(false);
+  setStopReason('');
+  setFinalProfitLoss(null);
+
+  // ✅ NEW: Open Gemini position for each selected model
+  if (isGeminiConnected && selectedModels.length > 0) {
+    for (const modelId of selectedModels) {
+      const model = modelsLatest[modelId];
+      if (!model) continue;
+
+      await handleStartGeminiTrading(model);
+      
+      // Small delay between orders
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
 };
 
 
@@ -798,7 +1314,7 @@ useEffect(() => {
     setStopReason('Trading stopped manually');
   };*/
 
-  const handleStopTrading = async () => {
+  /*const handleStopTrading = async () => {
     // 1) Existing simulator stop + P/L logic (unchanged)
     const totalProfit = selectedModels.reduce((sum, modelId) => {
       const currentValue = getNormalizedValue(modelId);
@@ -894,6 +1410,39 @@ useEffect(() => {
       setGeminiError(
         err.message || 'Error while closing BTC position on Gemini when stopping trading'
       );
+    }
+  }; */
+
+  const handleStopTrading = async () => {
+    // Calculate final P/L
+    const totalProfit = selectedModels.reduce((sum, modelId) => {
+      const currentValue = getNormalizedValue(modelId);
+      return sum + (currentValue - startValue);
+    }, 0);
+
+    setIsTrading(false);
+    setTradingStopped(true);
+    setFinalProfitLoss(totalProfit);
+    setStopReason('Trading stopped manually');
+
+    // ✅ NEW: Close all Gemini positions for selected models
+    if (isGeminiConnected && selectedModels.length > 0) {
+      for (const modelId of selectedModels) {
+        const model = modelsLatest[modelId];
+        if (!model) continue;
+
+        // Check if this model has an open position
+        const hasPosition = openPositions.some(
+          p => p.modelId === modelId && p.symbol.toLowerCase() === (selectedSymbol || 'btcusd').toLowerCase()
+        );
+
+        if (hasPosition) {
+          await handleStopGeminiTrading(model);
+          
+          // Small delay between orders
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
     }
   };
 
@@ -1857,6 +2406,11 @@ useEffect(() => {
                 pnlPercent = ((pnl / startValue) * 100).toFixed(2);
               }
 
+              // ✅ NEW: Check if this model has an open Gemini position
+              const hasGeminiPosition = openPositions.some(
+                p => p.modelId === modelId && p.symbol.toLowerCase() === (selectedSymbol || 'btcusd').toLowerCase()
+              );
+
               return (
                 <div
                   key={modelId}
@@ -1923,6 +2477,62 @@ useEffect(() => {
                       🔴 LIVE
                     </div>
                   )}
+                  {/* ✅ NEW: Gemini Trading Buttons */}
+                  {isGeminiConnected && isSelected && (
+                    <div
+                      style={{
+                        marginTop: '8px',
+                        display: 'flex',
+                        gap: '6px',
+                        borderTop: '1px solid #eee',
+                        paddingTop: '8px'
+                      }}
+                      onClick={(e) => e.stopPropagation()} // Prevent card selection when clicking buttons
+                    >
+                      {!hasGeminiPosition ? (
+                        <button
+                          onClick={() => handleStartGeminiTrading(model)}
+                          style={{
+                            flex: 1,
+                            padding: '6px 12px',
+                            backgroundColor: '#4caf50',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                            transition: 'background-color 0.2s'
+                          }}
+                          onMouseOver={(e) => e.target.style.backgroundColor = '#45a049'}
+                          onMouseOut={(e) => e.target.style.backgroundColor = '#4caf50'}
+                        >
+                          💎 Start Gemini
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleStopGeminiTrading(model)}
+                          style={{
+                            flex: 1,
+                            padding: '6px 12px',
+                            backgroundColor: '#f44336',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                            transition: 'background-color 0.2s'
+                          }}
+                          onMouseOver={(e) => e.target.style.backgroundColor = '#da190b'}
+                          onMouseOut={(e) => e.target.style.backgroundColor = '#f44336'}
+                        >
+                          🛑 Stop Gemini
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                 </div>
               );
             })}
@@ -1946,7 +2556,7 @@ useEffect(() => {
         <div style={{ display: 'flex', gap: '20px', marginBottom: '15px', flexWrap: 'wrap' }}>
           {/* ✅ NEW: Symbol Selection Dropdown */}
           <div style={{ flex: '1', minWidth: '200px' }}>
-       pbb     <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
               Trading Symbol:
             </label>
             <select
@@ -2123,6 +2733,28 @@ useEffect(() => {
               }}
             >
               Reset
+            </button>
+          )}
+
+          {/* ✅ NEW: Stop All Gemini button */}
+          {isGeminiConnected && openPositions.length > 0 && (
+            <button
+              onClick={handleStopAllGeminiTrading}
+              style={{
+                padding: '12px 24px',
+                fontSize: '16px',
+                fontWeight: 'bold',
+                backgroundColor: '#dc3545',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}
+            >
+              🛑 Stop All Gemini Trading ({openPositions.length})
             </button>
           )}
         </div>
@@ -2560,82 +3192,94 @@ useEffect(() => {
         )} 
 
       {/* ✅ Last 20 Market Trades from Gemini */}
-      <h2 style={{ margin: 0 }}>💎 Last 20 Market Trades (Gemini)</h2>
-      ...
-      <div style={{ overflowX: 'auto' }}>
+      {isGeminiConnected && (
         <div
           style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-            gap: '16px',
+            background: '#ffffff',
+            padding: '20px',
+            borderRadius: '8px',
+            marginBottom: '20px',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
           }}
         >
-          {[
-            { title: 'BTCUSD', trades: btcTrades },
-            { title: 'ETHUSD', trades: ethTrades },
-            { title: 'SOLUSD', trades: solTrades },
-          ].map(({ title, trades }) => (
-            <div key={title} style={{ border: '1px solid #eee', borderRadius: '6px' }}>
-              <div
-                style={{
-                  padding: '8px 12px',
-                  borderBottom: '1px solid #eee',
-                  fontWeight: 'bold',
-                }}
-              >
-                {title}
-              </div>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#fafafa' }}>
-                    <th style={{ padding: '6px', textAlign: 'left' }}>Time</th>
-                    <th style={{ padding: '6px', textAlign: 'center' }}>Type</th>
-                    <th style={{ padding: '6px', textAlign: 'right' }}>Price</th>
-                    <th style={{ padding: '6px', textAlign: 'right' }}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades && trades.length > 0 ? (
-                    trades.map((trade, index) => (
-                      <tr key={trade.tid || index} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                        <td style={{ padding: '6px', color: '#666' }}>
-                          {new Date(trade.timestampms).toLocaleTimeString()}
-                        </td>
-                        <td style={{ padding: '6px', textAlign: 'center' }}>
-                          <span
-                            style={{
-                              padding: '2px 8px',
-                              borderRadius: '4px',
-                              fontSize: '11px',
-                              fontWeight: 'bold',
-                              backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
-                              color: trade.type === 'buy' ? '#2e7d32' : '#c62828',
-                            }}
-                          >
-                            {trade.type.toUpperCase()}
-                          </span>
-                        </td>
-                        <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
-                          ${parseFloat(trade.price).toLocaleString()}
-                        </td>
-                        <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
-                          {parseFloat(trade.amount).toFixed(4)}
-                        </td>
+          <h2 style={{ marginTop: 0, marginBottom: '15px' }}>💎 Last 20 Market Trades (Gemini)</h2>
+          
+          <div style={{ overflowX: 'auto' }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                gap: '16px',
+              }}
+            >
+              {[
+                { title: 'BTCUSD', trades: btcTrades },
+                { title: 'ETHUSD', trades: ethTrades },
+                { title: 'SOLUSD', trades: solTrades },
+              ].map(({ title, trades }) => (
+                <div key={title} style={{ border: '1px solid #eee', borderRadius: '6px' }}>
+                  <div
+                    style={{
+                      padding: '8px 12px',
+                      borderBottom: '1px solid #eee',
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {title}
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#fafafa' }}>
+                        <th style={{ padding: '6px', textAlign: 'left' }}>Time</th>
+                        <th style={{ padding: '6px', textAlign: 'center' }}>Type</th>
+                        <th style={{ padding: '6px', textAlign: 'right' }}>Price</th>
+                        <th style={{ padding: '6px', textAlign: 'right' }}>Amount</th>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={4} style={{ padding: '8px', textAlign: 'center', color: '#999' }}>
-                        No trades yet
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                    </thead>
+                    <tbody>
+                      {trades && trades.length > 0 ? (
+                        trades.map((trade, index) => (
+                          <tr key={trade.tid || index} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                            <td style={{ padding: '6px', color: '#666' }}>
+                              {new Date(trade.timestampms).toLocaleTimeString()}
+                            </td>
+                            <td style={{ padding: '6px', textAlign: 'center' }}>
+                              <span
+                                style={{
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '11px',
+                                  fontWeight: 'bold',
+                                  backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
+                                  color: trade.type === 'buy' ? '#2e7d32' : '#c62828',
+                                }}
+                              >
+                                {trade.type.toUpperCase()}
+                              </span>
+                            </td>
+                            <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
+                              ${parseFloat(trade.price).toLocaleString()}
+                            </td>
+                            <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
+                              {parseFloat(trade.amount).toFixed(4)}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={4} style={{ padding: '8px', textAlign: 'center', color: '#999' }}>
+                            No trades yet
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
             </div>
-          ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Charts */}
       <div className="charts-container">

@@ -326,6 +326,128 @@ app.get('/api/gemini/open-positions', (req, res) => {
   }
 });
 
+/**
+ * Close all open Gemini positions for a given model (or all models)
+ * Body: { apiKey, apiSecret, env, modelId? }
+ */
+app.post('/api/gemini/close-open-positions', async (req, res) => {
+  try {
+    const { apiKey, apiSecret, env = 'live', modelId } = req.body;
+
+    if (!apiKey || !apiSecret) {
+      return res.status(400).json({
+        success: false,
+        error: 'API Key and API Secret are required',
+      });
+    }
+
+    // Filter in‑memory positions
+    const allPositions = Object.values(liveGeminiPositions);
+    const positionsToClose = modelId
+      ? allPositions.filter(p => p.modelId === modelId)
+      : allPositions;
+
+    if (positionsToClose.length === 0) {
+      return res.json({
+        success: true,
+        closed: 0,
+        failed: 0,
+        errors: [],
+        message: 'No open positions to close',
+      });
+    }
+
+    let closed = 0;
+    const errors = [];
+
+    for (const pos of positionsToClose) {
+      const { modelId: mId, modelName, symbol, amount, entryPrice } = pos;
+
+      try {
+        // get a fresh market price as exit
+        const exitPrice = await getGeminiPrice(symbol, env);
+        if (!exitPrice) {
+          throw new Error(`Could not fetch price for ${symbol}`);
+        }
+
+        // place SELL order on Gemini (this will also call closeLiveGeminiPositionAndRecord via /order)
+        console.log(
+          `🔻 Auto‑closing position: model=${modelName}, symbol=${symbol}, amount=${amount}, exit=${exitPrice}`,
+        );
+
+        const orderPayload = {
+          apiKey,
+          apiSecret,
+          symbol,
+          side: 'sell',
+          amount,
+          price: exitPrice,
+          type: 'exchange limit',
+          modelId: mId,
+          modelName,
+          closePosition: true,
+          env,
+        };
+
+        const order = await geminiRequest(
+          apiKey,
+          apiSecret,
+          '/v1/order/new',
+          {
+            symbol: symbol.toLowerCase(),
+            amount: amount.toString(),
+            price: exitPrice.toString(),
+            side: 'sell',
+            type: 'exchange limit',
+            options: ['maker-or-cancel'],
+            env,
+          },
+        );
+
+        console.log('✅ Close order placed:', order.order_id);
+
+        // record P&L and emit events
+        await closeLiveGeminiPositionAndRecord({
+          modelId: mId,
+          modelName,
+          symbol,
+          amount,
+          exitPrice,
+        });
+
+        closed++;
+      } catch (err) {
+        console.error('❌ Failed to auto‑close position:', {
+          symbol: pos.symbol,
+          model: pos.modelName,
+          message: err.message,
+          data: err.response?.data,
+        });
+        errors.push({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol: pos.symbol,
+          message: err.message,
+          geminiError: err.response?.data || null,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      closed,
+      failed: positionsToClose.length - closed,
+      errors,
+    });
+  } catch (err) {
+    console.error('❌ Error in /api/gemini/close-open-positions:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to close open positions',
+    });
+  }
+});
+
 /* ------------------------------
    MODELS INITIAL STATE
 --------------------------------*/
