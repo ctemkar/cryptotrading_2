@@ -250,7 +250,15 @@ const fetchOpenPositions = async () => {
       
       await fetchOpenPositions();
     } else {
-      alert(`❌ Failed to place order:\n${result.error}`);
+      // ✅ IMPROVED: Show specific error reason
+      let errorMsg = result.error || 'Unknown error';
+      
+      if (result.reason === 'amount_below_minimum' && result.details) {
+        errorMsg = `Amount ${result.details.attempted} is below Gemini's minimum of ${result.details.minimum} for ${result.details.symbol}`;
+      } else if (result.geminiReason === 'InsufficientFunds') {
+        errorMsg = `Insufficient funds in your Gemini account to place this order`;
+      }
+      alert(`❌ Failed to place order:\n${errorMsg}`);
     }
   } catch (error) {
     console.error('❌ Error starting Gemini trading:', error);
@@ -348,17 +356,32 @@ const handleStopGeminiTrading = async (model) => {
 
 // In Dashboard.jsx, above handleStopAllGeminiTrading
 const getAvailableBalance = (currencyCode) => {
-  // If geminiBalances is null or undefined, return 0
-  if (!geminiBalances) return 0;
+  if (!geminiBalances) {
+    console.warn('⚠️ geminiBalances is null/undefined');
+    return 0;
+  }
 
-  const code = currencyCode.toLowerCase(); // e.g., 'btc'
+  const code = currencyCode.toLowerCase();
   
-  // Since your console shows geminiBalances is an object like { btc: 0.0002... }
+  console.log('🔍 Looking up balance for:', code, 'in:', geminiBalances);
+  
+  // geminiBalances structure from useGemini: { btc: 0.0002, eth: 0.01, ... }
   const value = geminiBalances[code];
+  
+  if (value === undefined || value === null) {
+    console.warn(`⚠️ No balance found for ${code}`);
+    return 0;
+  }
 
-  // Convert to number and ensure it's valid
   const numValue = Number(value);
-  return Number.isFinite(numValue) ? numValue : 0;
+  
+  if (!Number.isFinite(numValue)) {
+    console.warn(`⚠️ Invalid balance value for ${code}:`, value);
+    return 0;
+  }
+
+  console.log(`✅ Balance for ${code}:`, numValue);
+  return numValue;
 };
 
 /**
@@ -507,14 +530,15 @@ const handleStopAllGeminiTrading = async () => {
 
       // ✅ Step 7: Place the sell order
       const result = await placeGeminiOrder({
-        symbol: position.symbol,
-        side: 'sell',
-        amount: amountToSell.toString(),
-        price: roundedPrice.toString(),
-        type: 'exchange limit',
-        modelId: position.modelId,
-        modelName: position.modelName,
-        closePosition: true,
+          symbol: position.symbol,
+          side: 'sell',
+          amount: amountToSell.toString(),
+          // price is NOT required for market orders; we keep it only for logging if backend ignores it
+          price: roundedPrice.toString(),
+          type: 'exchange limit',   // 🔑 use MARKET order so it actually fills
+          modelId: position.modelId,
+          modelName: position.modelName,
+          closePosition: true,
       });
 
       if (result.success) {
@@ -558,18 +582,30 @@ const handleStopAllGeminiTrading = async () => {
     errors: errors
   });
 
-  let alertMsg = `Closed ${successCount} position(s)\n`;
-  
-  if (failCount > 0) {
-    alertMsg += `Failed to close ${failCount} position(s)\n\n`;
-    alertMsg += 'Reasons:\n';
-    alertMsg += errors.map(e => {
-      const geminiReason = e.details?.reason || e.details?.message || e.reason;
-      return `• ${e.model} ${e.symbol.toUpperCase()}: ${geminiReason}`;
-    }).join('\n');
-  }
+  // ✅ Step 9: Show detailed results
+let alertMsg = `📊 Close All Positions Results:\n\n`;
+alertMsg += `✅ Successfully closed: ${successCount}\n`;
 
-  alert(alertMsg);
+if (failCount > 0) {
+  alertMsg += `❌ Failed to close: ${failCount}\n\n`;
+  alertMsg += `Reasons:\n`;
+  alertMsg += errors.map(e => {
+    const geminiReason = e.details?.reason || e.reason;
+    const geminiMsg = e.details?.message || '';
+    
+    let displayMsg = geminiReason;
+    
+    if (geminiReason === 'InvalidQuantity' || geminiMsg.includes('below minimum')) {
+      displayMsg = `Amount too small (below Gemini minimum)`;
+    } else if (geminiReason === 'InsufficientFunds') {
+      displayMsg = `Insufficient funds`;
+    }
+    
+    return `• ${e.model} ${e.symbol.toUpperCase()}: ${displayMsg}`;
+  }).join('\n');
+}
+
+alert(alertMsg);
 
   // ✅ Step 9: Refresh UI
   await fetchOpenPositions();

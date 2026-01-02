@@ -125,6 +125,53 @@ export function useGemini() {
     }
   };
 
+  // ✅ Function to close all open positions
+const closeAllPositions = async (modelId = null) => {
+  try {
+    setLoading(true);
+    setError(null);
+
+    console.log('🛑 Closing all Gemini positions...', { modelId });
+
+    const response = await axios.post('/api/gemini/close-open-positions', {
+      apiKey,
+      apiSecret,
+      env: 'live',
+      modelId, // optional: close only for specific model
+    });
+
+    if (response.data.success) {
+      console.log('✅ Close all positions result:', response.data);
+      
+      // Refresh balances and positions after closing
+      await fetchBalances();
+      await fetchOpenPositions();
+      
+      return {
+        success: true,
+        closed: response.data.closed,
+        failed: response.data.failed,
+        errors: response.data.errors || [],
+      };
+    } else {
+      throw new Error(response.data.error || 'Failed to close positions');
+    }
+  } catch (err) {
+    console.error('❌ Error closing all positions:', err);
+    const errorMsg = err.response?.data?.error || err.message || 'Failed to close positions';
+    setError(errorMsg);
+    return {
+      success: false,
+      error: errorMsg,
+      closed: 0,
+      failed: 0,
+      errors: [],
+    };
+  } finally {
+    setLoading(false);
+  }
+};
+
   // ✅ Function to connect (save credentials and fetch initial data)
   const connect = async (key, secret, symbol = 'btcusd') => {
     setLoading(true);
@@ -201,6 +248,7 @@ export function useGemini() {
     fetchMarketTrades,
     fetchOpenPositions, // ✅ NEW: expose fetch function
     placeOrder,
+    closeAllPositions,  // ✅ ADD THIS LINE
     setError,
   };
 }
