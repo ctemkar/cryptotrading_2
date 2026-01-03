@@ -275,7 +275,7 @@ function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price }) {
     modelId,
     modelName,
     symbol: symbol.toLowerCase(),
-    side: 'LONG',
+    side: side.toUpperCase(), // 'LONG',
     amount: parseFloat(amount),
     entryPrice: parseFloat(price),
     openedAt: Date.now(),
@@ -306,9 +306,22 @@ async function closeLiveGeminiPositionAndRecord({
   const qty = amount ? parseFloat(amount) : pos.amount;
   const entryPrice = pos.entryPrice;
   const exit = parseFloat(exitPrice);
-  const pnl = (exit - entryPrice) * qty; // LONG only for now
+  
+  // ✅ Calculate P&L based on position side
+  let pnl;
+  if (pos.side === 'LONG') {
+    pnl = (exit - entryPrice) * qty; // Profit when price rises
+  } else if (pos.side === 'SHORT') {
+    pnl = (entryPrice - exit) * qty; // Profit when price falls
+  } else {
+    pnl = 0; // Unknown side
+  }
+
   const timestamp = Date.now();
   const totalValue = (exit * qty).toFixed(2);
+
+  // ✅ Determine closing action based on position side
+  const closingAction = pos.side === 'LONG' ? 'SELL' : 'BUY';
 
   await db.query(
     `INSERT INTO trades (model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
@@ -316,7 +329,7 @@ async function closeLiveGeminiPositionAndRecord({
     [
       modelId,
       modelName,
-      'SELL',                 // closing trade
+      closingAction, // ✅ SELL to close LONG, BUY to close SHORT
       symbol.toUpperCase(),
       exit,
       qty,
@@ -326,15 +339,14 @@ async function closeLiveGeminiPositionAndRecord({
   );
 
   console.log(
-    `✅ [LIVE] Closed Gemini position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qty}, P&L = ${pnl.toFixed(
-      2
-    )}`
+    `✅ [LIVE] Closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qty}, P&L = ${pnl.toFixed(2)}`
   );
 
   io.emit('position_closed', {
     model_id: modelId,
     model_name: modelName,
     symbol: symbol.toUpperCase(),
+    side: pos.side,
     entryPrice,
     exitPrice: exit,
     quantity: qty,
@@ -345,6 +357,7 @@ async function closeLiveGeminiPositionAndRecord({
   delete liveGeminiPositions[key];
 
   return {
+    side: pos.side,
     entryPrice,
     exitPrice: exit,
     quantity: qty,
@@ -430,18 +443,20 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
     const errors = [];
 
     for (const pos of positionsToClose) {
-      const { modelId: mId, modelName, symbol, amount, entryPrice } = pos;
+      const { modelId: mId, modelName, symbol, amount } = pos;
 
       try {
         // ✅ STEP 2: Get the base currency (btcusd -> btc)
         const symbolBase = symbol.toLowerCase().replace('usd', '');
         const availableBalance = geminiBalances[symbolBase] || 0;
 
-        console.log(`🔍 Position: ${modelName} ${symbol}, DB amount: ${amount}, Available: ${availableBalance}`);
+        console.log(
+          `🔍 Position: ${modelName} ${symbol}, DB amount: ${amount}, Available: ${availableBalance}`,
+        );
 
         // ✅ STEP 3: Use the SMALLER of position size or available balance
         let closeAmount = Math.min(parseFloat(amount), availableBalance);
-        
+
         // Round to appropriate decimals
         closeAmount = Number(closeAmount.toFixed(8));
 
@@ -470,11 +485,31 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           throw new Error(`Could not fetch price for ${symbol}`);
         }
 
+        // ✅ Determine closing side based on position side
+        const positionSide = (pos.side || 'LONG').toUpperCase();
+        let closingSide;
+        if (positionSide === 'LONG') {
+          closingSide = 'sell'; // Close LONG with SELL
+        } else if (positionSide === 'SHORT') {
+          closingSide = 'buy';  // Close SHORT with BUY
+        } else {
+          const msg = `Unknown position side: ${pos.side}`;
+          console.warn(`⚠️ ${msg}`);
+          errors.push({
+            modelId: mId,
+            modelName,
+            symbol,
+            message: msg,
+            reason: 'unknown_side',
+          });
+          continue;
+        }
+
         console.log(
-          `🔻 Closing position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, exit=${exitPrice}`,
+          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}`,
         );
 
-        // ✅ STEP 6: Place SELL order on Gemini
+        // ✅ STEP 6: Place order on Gemini with correct closing side
         const order = await geminiRequest(
           apiKey,
           apiSecret,
@@ -483,9 +518,9 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
             symbol: symbol.toLowerCase(),
             amount: closeAmount.toString(),
             price: exitPrice.toString(),
-            side: 'sell',
+            side: closingSide, // ✅ Use calculated closing side
             type: 'exchange limit',
-            options: ['maker-or-cancel'],
+            options: ['immediate-or-cancel'],
             env,
           },
         );
@@ -508,7 +543,6 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
 
         // ✅ STEP 8: Only mark as closed if order actually filled
         if (!status.is_live && parseFloat(status.executed_amount) > 0) {
-          // Order filled successfully
           await closeLiveGeminiPositionAndRecord({
             modelId: mId,
             modelName,
@@ -518,7 +552,6 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           });
           closed++;
         } else {
-          // Order still open or canceled
           throw new Error(
             `Close order not filled (is_live: ${status.is_live}, executed: ${status.executed_amount})`
           );
@@ -531,7 +564,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           message: err.message,
           data: err.response?.data,
         });
-        
+
         const geminiError = err.response?.data;
         errors.push({
           modelId: pos.modelId,
@@ -1340,6 +1373,9 @@ app.get("/api/gemini/market-trades", async (req, res) => {
 
 app.post("/api/gemini/order", async (req, res) => {
   try {
+    // LOG 1: raw body
+    console.log('📥 /api/gemini/order RAW body:', req.body);
+    
     const {
       apiKey,
       apiSecret,
@@ -1354,8 +1390,24 @@ app.post("/api/gemini/order", async (req, res) => {
       env = 'live',
     } = req.body;
 
+    // LOG 2: parsed fields
+    console.log('📥 /api/gemini/order parsed:', {
+      apiKey: apiKey ? '[provided]' : '[missing]',
+      apiSecret: apiSecret ? '[provided]' : '[missing]',
+      symbol,
+      side,
+      amount,
+      price,
+      type,
+      modelId,
+      modelName,
+      closePosition,
+      env,
+    });
+
     // Validate input
     if (!apiKey || !apiSecret) {
+      console.error('❌ Validation failed: Missing API credentials');
       return res.status(400).json({
         success: false,
         error: "API Key and API Secret are required"
@@ -1363,6 +1415,7 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     if (!symbol || !side || !amount) {
+      console.error('❌ Validation failed: Missing required fields', { symbol, side, amount });
       return res.status(400).json({
         success: false,
         error: "Symbol, side (buy/sell), and amount are required"
@@ -1371,6 +1424,7 @@ app.post("/api/gemini/order", async (req, res) => {
 
     // Validate side
     if (!['buy', 'sell'].includes(side.toLowerCase())) {
+      console.error('❌ Validation failed: Invalid side', { side });
       return res.status(400).json({
         success: false,
         error: "Side must be 'buy' or 'sell'"
@@ -1380,14 +1434,18 @@ app.post("/api/gemini/order", async (req, res) => {
     // Validate amount
     const amountNum = parseFloat(amount);
     if (isNaN(amountNum) || amountNum <= 0) {
+      console.error('❌ Validation failed: Invalid amount', { amount, amountNum });
       return res.status(400).json({
         success: false,
         error: "Amount must be a positive number"
       });
     }
 
-    // ✅ NEW: Check minimum order size BEFORE calling Gemini
+    // ✅ Check minimum order size BEFORE calling Gemini
+    console.log('🔍 Validating order amount:', { symbol, amount });
     const validation = validateOrderAmount(symbol, amount);
+    console.log('🔍 Validation result:', validation);
+    
     if (!validation.valid) {
       console.warn(`⚠️ Order rejected: ${validation.error}`);
       return res.status(400).json({
@@ -1406,6 +1464,7 @@ app.post("/api/gemini/order", async (req, res) => {
     if (type.includes('limit')) {
       const priceNum = parseFloat(price);
       if (!price || isNaN(priceNum) || priceNum <= 0) {
+        console.error('❌ Validation failed: Invalid price for limit order', { price, priceNum });
         return res.status(400).json({
           success: false,
           error: "Price is required for limit orders and must be a positive number"
@@ -1419,7 +1478,7 @@ app.post("/api/gemini/order", async (req, res) => {
       }, close=${!!closePosition})`
     );
 
-    // ✅ Prepare order payload (no price by default)
+    // ✅ Prepare order payload
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: amount.toString(),
@@ -1431,16 +1490,15 @@ app.post("/api/gemini/order", async (req, res) => {
     if (type.includes('limit')) {
       const numericPrice = Number(price);
       
-      // Double-check price is valid (should already be validated above)
       if (!numericPrice || numericPrice <= 0) {
         throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
       }
 
       orderPayload.price = numericPrice.toString();
-      
-      // ✅ Use immediate-or-cancel for all orders (fills immediately like market)
       orderPayload.options = ['immediate-or-cancel'];
     }
+
+    console.log('📤 Sending to Gemini:', orderPayload);
 
     // Call Gemini API to place order
     const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", {
@@ -1456,12 +1514,14 @@ app.post("/api/gemini/order", async (req, res) => {
       is_live: order.is_live,
     });
 
-    // ✅ When we BUY and the order is linked to a model => open live position
-    if (side.toLowerCase() === 'buy' && modelId && modelName) {
+    // ====== POSITION OPEN / CLOSE LOGIC ======
+
+    // ✅ When we BUY and NOT closing => open LONG position
+    if (side.toLowerCase() === 'buy' && !closePosition && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
 
-      console.log('📋 Buy order execution status:', {
+      console.log('📋 Buy (open LONG) order execution status:', {
         order_id: order.order_id,
         is_live: isLive,
         executed_amount: executed,
@@ -1469,41 +1529,72 @@ app.post("/api/gemini/order", async (req, res) => {
         avg_execution_price: order.avg_execution_price,
       });
 
-      // ✅ Only open position if order actually filled
       if (!isLive && executed > 0) {
         const actualPrice = parseFloat(order.avg_execution_price || order.price || price);
         openLiveGeminiPosition({
           modelId,
           modelName,
           symbol,
-          amount: executed, // ✅ Use actual executed amount
-          price: actualPrice, // ✅ Use actual execution price
+          amount: executed,
+          price: actualPrice,
+          side: 'LONG',
         });
-        console.log(`✅ Position opened: ${modelName} ${symbol}, amount: ${executed}, price: ${actualPrice}`);
+        console.log(`✅ LONG position opened: ${modelName} ${symbol}, amount: ${executed}, price: ${actualPrice}`);
       } else {
         console.warn(
-          `⚠️ Buy order for ${symbol} not filled (is_live=${isLive}, executed=${executed}). Position NOT opened.`
+          `⚠️ Buy order for ${symbol} not filled (is_live=${isLive}, executed=${executed}). LONG position NOT opened.`
         );
       }
     }
 
-    // ✅ When we SELL with closePosition=true => close live position + log P&L
-    let closingInfo = null;
-    if (side.toLowerCase() === 'sell' && closePosition && modelId && modelName) {
+    // ✅ When we SELL and NOT closing => open SHORT position
+    if (side.toLowerCase() === 'sell' && !closePosition && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
 
-      console.log('📋 Close order execution status:', {
+      console.log('📋 Sell (open SHORT) order execution status:', {
+        order_id: order.order_id,
+        is_live: isLive,
+        executed_amount: executed,
+        original_amount: order.original_amount,
+        avg_execution_price: order.avg_execution_price,
+      });
+
+      if (!isLive && executed > 0) {
+        const actualPrice = parseFloat(order.avg_execution_price || order.price || price);
+        openLiveGeminiPosition({
+          modelId,
+          modelName,
+          symbol,
+          amount: executed,
+          price: actualPrice,
+          side: 'SHORT',
+        });
+        console.log(`✅ SHORT position opened: ${modelName} ${symbol}, amount: ${executed}, price: ${actualPrice}`);
+      } else {
+        console.warn(
+          `⚠️ Sell order for ${symbol} not filled (is_live=${isLive}, executed=${executed}). SHORT position NOT opened.`
+        );
+      }
+    }
+
+    // ✅ When closing (BUY to close SHORT, or SELL to close LONG) => close live position + log P&L
+    let closingInfo = null;
+    if (closePosition && modelId && modelName) {
+      const executed = parseFloat(order.executed_amount || '0');
+      const isLive = !!order.is_live;
+
+      console.log('📋 Close position order execution status:', {
         order_id: order.order_id,
         is_live: isLive,
         executed_amount: executed,
         original_amount: order.original_amount,
         avg_execution_price: order.avg_execution_price || order.price,
+        side_used_to_close: side.toLowerCase(),
       });
 
-      // ✅ Only mark as closed if the order actually filled (or at least partially)
       if (!isLive && executed > 0) {
-        const qtyForPnl = executed; // use executed size, not requested
+        const qtyForPnl = executed;
         const exitPrice = parseFloat(order.avg_execution_price || order.price || price);
         
         closingInfo = await closeLiveGeminiPositionAndRecord({
@@ -1514,13 +1605,19 @@ app.post("/api/gemini/order", async (req, res) => {
           exitPrice: exitPrice,
         });
         
-        console.log(`✅ Position closed and recorded: ${modelName} ${symbol}, P&L: ${closingInfo?.pnl || 'N/A'}`);
+        console.log(
+          `✅ Position closed and recorded: ${modelName} ${symbol}, ` +
+          `qty=${qtyForPnl}, exit=${exitPrice}, P&L: ${closingInfo?.pnl ?? 'N/A'}`
+        );
       } else {
         console.warn(
-          `⚠️ Close order for ${symbol} not filled yet (is_live=${isLive}, executed=${executed}). Position NOT marked as closed.`
+          `⚠️ Close order for ${symbol} not filled yet (is_live=${isLive}, executed=${executed}). ` +
+          `Position NOT marked as closed.`
         );
       }
     }
+
+    // ====== END POSITION OPEN / CLOSE LOGIC ======
 
     // ✅ Return detailed order response
     res.json({
@@ -1543,17 +1640,16 @@ app.post("/api/gemini/order", async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`❌ [${req.body.env?.toUpperCase() || 'LIVE'}] Error placing order:`, error.message);
+    console.error('❌ /api/gemini/order UNCAUGHT ERROR:', error);
+    console.error(`❌ [${req.body?.env?.toUpperCase() || 'LIVE'}] Error placing order:`, error.message);
     
-    // ✅ IMPROVED: Extract Gemini's specific error reason
     const geminiError = error.response?.data;
     console.error("❌ Full Gemini error:", geminiError);
 
     if (error.response) {
       const status = error.response.status;
-      const data = error.response.data;
+      const data = error.response.data || {};
       
-      // ✅ Handle specific Gemini error reasons
       let userFriendlyError = data.message || data.reason || "Failed to place order";
       let errorReason = data.reason || 'unknown';
       

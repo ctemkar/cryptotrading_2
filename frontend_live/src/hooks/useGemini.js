@@ -86,44 +86,66 @@ export function useGemini() {
 
   // ✅ Function to place an order (BUY or SELL)
   // orderData should include: symbol, side, amount, price, type, modelId, modelName, closePosition
-  const placeOrder = async (orderData) => {
-    try {
-      setLoading(true);
-      setError(null);
+  // ✅ Function to place an order (BUY or SELL)
+// orderData should include: symbol, side, amount, price, type, modelId, modelName, closePosition
+const placeOrder = async (orderData) => {
+  try {
+    setLoading(true);
+    setError(null);
 
-      console.log('📤 Placing Gemini order:', orderData);
+    console.log('📤 placeOrder called with:', orderData);
 
-      const response = await axios.post('/api/gemini/order', {
-        apiKey,
-        apiSecret,
-        env: 'live',   // ✅ Always live
-        ...orderData,  // passes modelId, modelName, closePosition, type, etc.
-      });
+    const payload = {
+      apiKey,
+      apiSecret,
+      env: 'live',   // ✅ Always live
+      ...orderData,  // passes modelId, modelName, closePosition, type, side, etc.
+    };
 
-      if (response.data.success) {
-        console.log('✅ Gemini order placed successfully:', response.data.order);
-        
-        // Refresh balances and positions after successful order
-        await fetchBalances();
-        await fetchOpenPositions();
-        
-        return { 
-          success: true, 
-          data: response.data.order,
-          positionClose: response.data.positionClose // P&L info if closing
-        };
-      } else {
-        throw new Error(response.data.error || 'Failed to place order');
-      }
-    } catch (err) {
-      console.error('❌ Error placing order:', err);
-      const errorMsg = err.response?.data?.error || err.message || 'Failed to place order';
-      setError(errorMsg);
-      return { success: false, error: errorMsg };
-    } finally {
-      setLoading(false);
+    console.log('📦 POST /api/gemini/order payload:', payload);
+
+    const response = await axios.post('/api/gemini/order', payload);
+
+    console.log('✅ Gemini order response:', response.data);
+
+    if (response.data.success) {
+      console.log('✅ Gemini order placed successfully:', response.data.order);
+      
+      // Refresh balances and positions after successful order
+      await fetchBalances();
+      await fetchOpenPositions();
+      
+      return { 
+        success: true, 
+        order: response.data.order,
+        positionClose: response.data.positionClose // P&L info if closing
+      };
+    } else {
+      // Return the error from the server
+      return {
+        success: false,
+        error: response.data.error || 'Failed to place order',
+        reason: response.data.reason,
+        details: response.data.details,
+        geminiReason: response.data.geminiReason,
+        geminiMessage: response.data.geminiMessage,
+      };
     }
-  };
+  } catch (err) {
+    console.error('❌ Error placing order:', err);
+    const errorData = err.response?.data || {};
+    return {
+      success: false,
+      error: errorData.error || err.message || 'Failed to place order',
+      reason: errorData.reason,
+      details: errorData.details,
+      geminiReason: errorData.geminiReason,
+      geminiMessage: errorData.geminiMessage,
+    };
+  } finally {
+    setLoading(false);
+  }
+};
 
   // ✅ Function to close all open positions
 const closeAllPositions = async (modelId = null) => {
@@ -248,6 +270,7 @@ const closeAllPositions = async (modelId = null) => {
     fetchMarketTrades,
     fetchOpenPositions, // ✅ NEW: expose fetch function
     placeOrder,
+    placeGeminiOrder: placeOrder,  // ✅ ADD THIS LINE (alias)
     closeAllPositions,  // ✅ ADD THIS LINE
     setError,
   };

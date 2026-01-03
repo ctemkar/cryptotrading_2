@@ -15,6 +15,9 @@ function Dashboard() {
   // ✅ Symbol selection state
 const [selectedSymbol, setSelectedSymbol] = useState('btcusd');
 
+// Add state for order side selection
+const [orderSide, setOrderSide] = useState('buy'); // 'buy' or 'sell'
+
 // ✅ Available symbols
 const AVAILABLE_SYMBOLS = [
   { value: 'btcusd', label: 'BTC / USD' },
@@ -212,25 +215,30 @@ const fetchOpenPositions = async () => {
     amount = 0.001;
   }
 
+  // ✅ Use orderSide state (should be 'buy' or 'sell')
+  const side = orderSide || 'buy'; // Default to 'buy' if not set
+  const sideLabel = side === 'buy' ? 'Long' : 'Short';
+  const sideAction = side.toUpperCase();
+
   const confirmed = window.confirm(
     `Start Gemini Live Trading?\n\n` +
     `Model: ${model.name}\n` +
     `Symbol: ${symbol.toUpperCase()}\n` +
-    `Side: BUY (Long)\n` +
+    `Side: ${sideAction} (${sideLabel})\n` +
     `Amount: ${amount}\n` +
     `Price: $${currentPrice.toFixed(2)}\n` +
     `Total: $${(amount * currentPrice).toFixed(2)}\n\n` +
-    `This will place a REAL order on Gemini.`
+    `This will place a REAL ${sideAction} order on Gemini.`
   );
 
   if (!confirmed) return;
 
   try {
-    console.log(`🚀 Starting Gemini trading for ${model.name} on ${symbol}`);
+    console.log(`🚀 Starting Gemini trading for ${model.name} on ${symbol} (${sideAction} - ${sideLabel})`);
 
     const result = await placeGeminiOrder({
       symbol,
-      side: 'buy',
+      side: side, // ✅ Use selected side ('buy' or 'sell')
       amount: amount.toString(),
       price: currentPrice.toString(),
       type: 'exchange limit',
@@ -241,9 +249,10 @@ const fetchOpenPositions = async () => {
 
     if (result.success) {
       alert(
-        `✅ Gemini BUY order placed!\n\n` +
+        `✅ Gemini ${sideAction} order placed!\n\n` +
         `Model: ${model.name}\n` +
         `Symbol: ${symbol.toUpperCase()}\n` +
+        `Side: ${sideLabel}\n` +
         `Amount: ${amount}\n` +
         `Price: $${currentPrice.toFixed(2)}`
       );
@@ -288,6 +297,22 @@ const handleStopGeminiTrading = async (model) => {
     return;
   }
 
+  // ✅ Determine closing side based on position side
+  const positionSide = (position.side || 'LONG').toUpperCase();
+  let closingSide;
+  let closingLabel;
+  
+  if (positionSide === 'LONG') {
+    closingSide = 'sell';
+    closingLabel = 'SELL (Close Long)';
+  } else if (positionSide === 'SHORT') {
+    closingSide = 'buy';
+    closingLabel = 'BUY (Close Short)';
+  } else {
+    alert('Unknown position side');
+    return;
+  }
+
   const currentPrice = getCurrentPrice(symbol);
 
   if (!currentPrice || currentPrice <= 0) {
@@ -299,29 +324,39 @@ const handleStopGeminiTrading = async (model) => {
   const amount = position.amount;
   const entryValue = amount * entryPrice;
   const exitValue = amount * currentPrice;
-  const estimatedPnL = exitValue - entryValue;
-  const estimatedPnLPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+  
+  // ✅ Calculate P&L based on position side
+  let estimatedPnL;
+  if (positionSide === 'LONG') {
+    estimatedPnL = exitValue - entryValue; // Profit when price rises
+  } else if (positionSide === 'SHORT') {
+    estimatedPnL = entryValue - exitValue; // Profit when price falls
+  } else {
+    estimatedPnL = 0;
+  }
+  
+  const estimatedPnLPercent = (estimatedPnL / entryValue) * 100;
 
   const confirmed = window.confirm(
     `Stop Gemini Live Trading?\n\n` +
     `Model: ${model.name}\n` +
     `Symbol: ${symbol.toUpperCase()}\n` +
-    `Side: SELL (Close Long)\n` +
+    `Side: ${closingLabel}\n` +
     `Amount: ${amount}\n` +
     `Entry Price: $${entryPrice.toFixed(2)}\n` +
     `Current Price: $${currentPrice.toFixed(2)}\n` +
     `Estimated P&L: $${estimatedPnL.toFixed(2)} (${estimatedPnLPercent.toFixed(2)}%)\n\n` +
-    `This will place a REAL SELL order on Gemini.`
+    `This will place a REAL ${closingSide.toUpperCase()} order on Gemini.`
   );
 
   if (!confirmed) return;
 
   try {
-    console.log(`🛑 Stopping Gemini trading for ${model.name} on ${symbol}`);
+    console.log(`🛑 Stopping Gemini trading for ${model.name} on ${symbol} (closing ${positionSide} with ${closingSide.toUpperCase()})`);
 
     const result = await placeGeminiOrder({
       symbol,
-      side: 'sell',
+      side: closingSide, // ✅ Use calculated closing side
       amount: amount.toString(),
       price: currentPrice.toString(),
       type: 'exchange limit',
@@ -335,9 +370,10 @@ const handleStopGeminiTrading = async (model) => {
       const actualPnLPercent = result.positionClose?.pnlPercent || estimatedPnLPercent;
 
       alert(
-        `✅ Gemini SELL order placed & position closed!\n\n` +
+        `✅ Gemini ${closingSide.toUpperCase()} order placed & position closed!\n\n` +
         `Model: ${model.name}\n` +
         `Symbol: ${symbol.toUpperCase()}\n` +
+        `Position: ${positionSide}\n` +
         `Entry: $${entryPrice.toFixed(2)}\n` +
         `Exit: $${currentPrice.toFixed(2)}\n` +
         `P&L: $${actualPnL.toFixed(2)} (${actualPnLPercent.toFixed(2)}%)`
@@ -2689,6 +2725,31 @@ const handleStartTrading = async () => {
             />
             <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
               Suggested: ${(startValue * 1.03).toFixed(0)} (3% above starting value)
+            </div>
+          </div>
+          <div style={{ flex: '1', minWidth: '200px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
+              Order Side:
+            </label>
+            <select
+              value={orderSide}
+              onChange={(e) => setOrderSide(e.target.value)}
+              disabled={isTrading}
+              style={{
+                width: '100%',
+                padding: '10px',
+                fontSize: '16px',
+                borderRadius: '4px',
+                border: '1px solid #ccc',
+                backgroundColor: isTrading ? '#f5f5f5' : 'white',
+                cursor: isTrading ? 'not-allowed' : 'pointer'
+              }}
+            >
+              <option value="buy">BUY (Long)</option>
+              <option value="sell">SELL (Short)</option>
+            </select>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
+              Long = profit when price rises, Short = profit when price falls
             </div>
           </div>
         </div>
