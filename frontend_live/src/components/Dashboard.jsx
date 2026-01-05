@@ -7,6 +7,8 @@ import { useGemini } from '../hooks/useGemini';
 import socket from '../services/socket';
 
 function Dashboard() {
+
+  const [geminiTradingStatuses, setGeminiTradingStatuses] = useState({});
   // ✅ Google Login State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userInfo, setUserInfo] = useState(null);
@@ -164,32 +166,10 @@ const handleStartGeminiTrading = async (model) => {
     return;
   }
 
-  /**
- * Fetch open Gemini positions from backend
- */
-const fetchOpenPositions = async () => {
-  if (!isGeminiConnected) {
-    setOpenPositions([]);
-    return;
-  }
-
-  try {
-    setLoadingPositions(true);
-    const res = await fetch('/api/gemini/open-positions');
-    const data = await res.json();
-    
-    if (!data.success) {
-      console.error('Error fetching open positions:', data.error);
-      return;
-    }
-    
-    setOpenPositions(data.positions || []);
-  } catch (err) {
-    console.error('Error fetching open positions:', err.message);
-  } finally {
-    setLoadingPositions(false);
-  }
-};
+  // ✅ DECLARE 'side' ONLY ONCE - RIGHT HERE
+  const side = orderSide || 'buy';
+  const sideLabel = side === 'buy' ? 'Long' : 'Short';
+  const sideAction = side.toUpperCase();
 
   // Check for existing position
   const existingPosition = openPositions.find(
@@ -215,11 +195,6 @@ const fetchOpenPositions = async () => {
     amount = 0.001;
   }
 
-  // ✅ Use orderSide state (should be 'buy' or 'sell')
-  const side = orderSide || 'buy'; // Default to 'buy' if not set
-  const sideLabel = side === 'buy' ? 'Long' : 'Short';
-  const sideAction = side.toUpperCase();
-
   const confirmed = window.confirm(
     `Start Gemini Live Trading?\n\n` +
     `Model: ${model.name}\n` +
@@ -234,44 +209,41 @@ const fetchOpenPositions = async () => {
   if (!confirmed) return;
 
   try {
-    console.log(`🚀 Starting Gemini trading for ${model.name} on ${symbol} (${sideAction} - ${sideLabel})`);
+    setGeminiTradingStatuses(prev => ({
+      ...prev,
+      [model.id]: { ...prev[model.id], isLoading: true }
+    }));
 
+    // ✅ Use 'side' here (already declared above)
     const result = await placeGeminiOrder({
-      symbol,
-      side: side, // ✅ Use selected side ('buy' or 'sell')
-      amount: amount.toString(),
-      price: currentPrice.toString(),
-      type: 'exchange limit',
       modelId: model.id,
       modelName: model.name,
+      symbol: symbol.toLowerCase(),
+      amount: amount,
+      side: side,              // ✅ or just: side,
+      price: currentPrice,
+      type: 'exchange limit',
       closePosition: false,
     });
 
-    if (result.success) {
-      alert(
-        `✅ Gemini ${sideAction} order placed!\n\n` +
-        `Model: ${model.name}\n` +
-        `Symbol: ${symbol.toUpperCase()}\n` +
-        `Side: ${sideLabel}\n` +
-        `Amount: ${amount}\n` +
-        `Price: $${currentPrice.toFixed(2)}`
-      );
-      
-      await fetchOpenPositions();
-    } else {
-      // ✅ IMPROVED: Show specific error reason
-      let errorMsg = result.error || 'Unknown error';
-      
-      if (result.reason === 'amount_below_minimum' && result.details) {
-        errorMsg = `Amount ${result.details.attempted} is below Gemini's minimum of ${result.details.minimum} for ${result.details.symbol}`;
-      } else if (result.geminiReason === 'InsufficientFunds') {
-        errorMsg = `Insufficient funds in your Gemini account to place this order`;
-      }
-      alert(`❌ Failed to place order:\n${errorMsg}`);
+    if (!result.success) {
+      alert(`Failed to place order: ${result.error || 'Unknown error'}`);
+      return;
     }
-  } catch (error) {
-    console.error('❌ Error starting Gemini trading:', error);
-    alert(`Error: ${error.message}`);
+
+    console.log('✅ Order placed successfully:', result.order);
+    alert(`Order placed successfully!\nOrder ID: ${result.order?.order_id || 'N/A'}`);
+
+    await fetchOpenPositions();
+
+  } catch (err) {
+    console.error('❌ Error starting Gemini trading:', err);
+    alert(`Failed to place order: ${err.message || err.toString()}`);
+  } finally {
+    setGeminiTradingStatuses(prev => ({
+      ...prev,
+      [model.id]: { ...prev[model.id], isLoading: false }
+    }));
   }
 };
 

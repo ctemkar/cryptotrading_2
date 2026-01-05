@@ -269,7 +269,7 @@ function livePosKey(modelId, symbol) {
   return `${modelId}_${symbol.toLowerCase()}`;
 }
 
-function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price }) {
+function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price, side }) {
   const key = livePosKey(modelId, symbol);
   liveGeminiPositions[key] = {
     modelId,
@@ -303,22 +303,22 @@ async function closeLiveGeminiPositionAndRecord({
     return null;
   }
 
-  const qty = amount ? parseFloat(amount) : pos.amount;
+  const qtyExecuted = amount ? parseFloat(amount) : pos.amount;
   const entryPrice = pos.entryPrice;
   const exit = parseFloat(exitPrice);
-  
-  // ✅ Calculate P&L based on position side
+
+  // ✅ Calculate P&L based on position side and executed qty
   let pnl;
   if (pos.side === 'LONG') {
-    pnl = (exit - entryPrice) * qty; // Profit when price rises
+    pnl = (exit - entryPrice) * qtyExecuted; // Profit when price rises
   } else if (pos.side === 'SHORT') {
-    pnl = (entryPrice - exit) * qty; // Profit when price falls
+    pnl = (entryPrice - exit) * qtyExecuted; // Profit when price falls
   } else {
-    pnl = 0; // Unknown side
+    pnl = 0;
   }
 
   const timestamp = Date.now();
-  const totalValue = (exit * qty).toFixed(2);
+  const totalValue = (exit * qtyExecuted).toFixed(2);
 
   // ✅ Determine closing action based on position side
   const closingAction = pos.side === 'LONG' ? 'SELL' : 'BUY';
@@ -329,18 +329,31 @@ async function closeLiveGeminiPositionAndRecord({
     [
       modelId,
       modelName,
-      closingAction, // ✅ SELL to close LONG, BUY to close SHORT
+      closingAction,
       symbol.toUpperCase(),
       exit,
-      qty,
+      qtyExecuted,
       totalValue,
       timestamp,
     ]
   );
 
-  console.log(
-    `✅ [LIVE] Closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qty}, P&L = ${pnl.toFixed(2)}`
-  );
+  // ✅ Update in‑memory position for partial closes
+  const remaining = pos.amount - qtyExecuted;
+
+  if (remaining <= 0.00000001) {
+    // Fully closed
+    delete liveGeminiPositions[key];
+    console.log(
+      `✅ [LIVE] Fully closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qtyExecuted}, P&L = ${pnl.toFixed(2)}`
+    );
+  } else {
+    // Partial close: reduce remaining amount
+    liveGeminiPositions[key].amount = remaining;
+    console.log(
+      `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)}`
+    );
+  }
 
   io.emit('position_closed', {
     model_id: modelId,
@@ -349,18 +362,18 @@ async function closeLiveGeminiPositionAndRecord({
     side: pos.side,
     entryPrice,
     exitPrice: exit,
-    quantity: qty,
+    quantity: qtyExecuted,
     pnl,
+    remainingAmount: remaining > 0 ? remaining : 0,
     timestamp,
   });
-
-  delete liveGeminiPositions[key];
 
   return {
     side: pos.side,
     entryPrice,
     exitPrice: exit,
-    quantity: qty,
+    quantity: qtyExecuted,
+    remaining,
     pnl,
     timestamp,
   };
@@ -392,6 +405,7 @@ app.get('/api/gemini/open-positions', (req, res) => {
  * Body: { apiKey, apiSecret, env, modelId? }
  */
 app.post('/api/gemini/close-open-positions', async (req, res) => {
+  console.log('🔥 /api/gemini/close-open-positions HIT', req.body);  // <– ADD THIS
   try {
     const { apiKey, apiSecret, env = 'live', modelId } = req.body;
 
@@ -418,7 +432,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
       });
     }
 
-    // ✅ STEP 1: Fetch REAL balances from Gemini FIRST
+    // ✅ STEP 1: Fetch REAL balances from Gemini FIRST (for logging / sanity)
     console.log('📊 Fetching real Gemini balances before closing...');
     let geminiBalances = {};
     try {
@@ -442,25 +456,24 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
     let closed = 0;
     const errors = [];
 
+    // ================== MAIN LOOP ==================
     for (const pos of positionsToClose) {
-      const { modelId: mId, modelName, symbol, amount } = pos;
-
       try {
-        // ✅ STEP 2: Get the base currency (btcusd -> btc)
+        const { modelId: mId, modelName, symbol, amount } = pos;
+
+        // ✅ STEP 2: Use position size as target close amount
+        const positionAmount = parseFloat(amount);
+
+        // Optional: still log available balance for debugging
         const symbolBase = symbol.toLowerCase().replace('usd', '');
         const availableBalance = geminiBalances[symbolBase] || 0;
-
         console.log(
-          `🔍 Position: ${modelName} ${symbol}, DB amount: ${amount}, Available: ${availableBalance}`,
+          `🔍 Position: ${modelName} ${symbol}, position amount: ${positionAmount}, available balance: ${availableBalance}`,
         );
 
-        // ✅ STEP 3: Use the SMALLER of position size or available balance
-        let closeAmount = Math.min(parseFloat(amount), availableBalance);
+        let closeAmount = positionAmount;
 
-        // Round to appropriate decimals
-        closeAmount = Number(closeAmount.toFixed(8));
-
-        // ✅ STEP 4: Validate minimum order size
+        // ✅ STEP 3: Validate minimum order size
         const validation = validateOrderAmount(symbol, closeAmount);
         if (!validation.valid) {
           console.warn(`⚠️ Cannot close ${modelName} ${symbol}: ${validation.error}`);
@@ -471,7 +484,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
             message: validation.error,
             reason: 'amount_below_minimum',
             details: {
-              attempted: closeAmount,
+              attempted: validation.attempted,
               minimum: validation.minRequired,
               available: availableBalance,
             },
@@ -479,13 +492,13 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           continue; // Skip this position
         }
 
-        // ✅ STEP 5: Get fresh market price
+        // ✅ STEP 4: Get fresh market price
         const exitPrice = await getGeminiPrice(symbol, env);
         if (!exitPrice) {
           throw new Error(`Could not fetch price for ${symbol}`);
         }
 
-        // ✅ Determine closing side based on position side
+        // ✅ STEP 5: Determine closing side based on position side
         const positionSide = (pos.side || 'LONG').toUpperCase();
         let closingSide;
         if (positionSide === 'LONG') {
@@ -505,11 +518,21 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           continue;
         }
 
+        // ✅ STEP 6: Buffered limit price so it behaves like market but likely fills
+        let limitPrice = exitPrice;
+        if (closingSide === 'sell') {
+          // Closing LONG – accept slightly lower price
+          limitPrice = exitPrice * 0.999;   // 0.1% lower
+        } else {
+          // Closing SHORT – pay slightly more
+          limitPrice = exitPrice * 1.001;   // 0.1% higher
+        }
+
         console.log(
-          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}`,
+          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}, limitPrice=${limitPrice}`,
         );
 
-        // ✅ STEP 6: Place order on Gemini with correct closing side
+        // ✅ STEP 7: Place order on Gemini with correct closing side
         const order = await geminiRequest(
           apiKey,
           apiSecret,
@@ -517,8 +540,8 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           {
             symbol: symbol.toLowerCase(),
             amount: closeAmount.toString(),
-            price: exitPrice.toString(),
-            side: closingSide, // ✅ Use calculated closing side
+            price: limitPrice.toFixed(2),
+            side: closingSide,
             type: 'exchange limit',
             options: ['immediate-or-cancel'],
             env,
@@ -527,7 +550,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
 
         console.log('✅ Close order placed:', order.order_id);
 
-        // ✅ STEP 7: Wait 1 second and check order status
+        // ✅ STEP 8: Wait 1 second and check order status
         await new Promise(r => setTimeout(r, 1000));
 
         const status = await geminiRequest(apiKey, apiSecret, '/v1/order/status', {
@@ -539,17 +562,21 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           order_id: status.order_id,
           is_live: status.is_live,
           executed_amount: status.executed_amount,
+          original_amount: status.original_amount,
         });
 
-        // ✅ STEP 8: Only mark as closed if order actually filled
-        if (!status.is_live && parseFloat(status.executed_amount) > 0) {
-          await closeLiveGeminiPositionAndRecord({
+        const executed = parseFloat(status.executed_amount || '0');
+
+        // ✅ STEP 9: Only record/adjust if something actually executed
+        if (!status.is_live && executed > 0) {
+          const closingInfo = await closeLiveGeminiPositionAndRecord({
             modelId: mId,
             modelName,
             symbol,
-            amount: closeAmount,
+            amount: executed,   // use actually executed amount
             exitPrice,
           });
+          console.log('✅ Position close recorded:', closingInfo);
           closed++;
         } else {
           throw new Error(
@@ -576,6 +603,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
         });
       }
     }
+    // ================== END MAIN LOOP ==================
 
     return res.json({
       success: true,
