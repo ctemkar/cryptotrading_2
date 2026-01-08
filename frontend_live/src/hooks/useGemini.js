@@ -194,6 +194,29 @@ const closeAllPositions = async (modelId = null) => {
   }
 };
 
+// ✅ Function to clear position tracking (for reset)
+const clearPositions = async (modelId = null) => {
+  try {
+    const response = await axios.post('/api/gemini/clear-positions', {
+      modelId, // optional: clear only for specific model
+    });
+
+    if (response.data.success) {
+      console.log('✅ Positions cleared from backend');
+      await fetchOpenPositions(); // refresh UI
+      return { success: true };
+    } else {
+      throw new Error(response.data.error || 'Failed to clear positions');
+    }
+  } catch (err) {
+    console.error('❌ Error clearing positions:', err);
+    return {
+      success: false,
+      error: err.response?.data?.error || err.message || 'Failed to clear positions',
+    };
+  }
+};
+
   // ✅ Function to connect (save credentials and fetch initial data)
   const connect = async (key, secret, symbol = 'btcusd') => {
     setLoading(true);
@@ -272,6 +295,7 @@ const closeAllPositions = async (modelId = null) => {
     placeOrder,
     placeGeminiOrder: placeOrder,  // ✅ ADD THIS LINE (alias)
     closeAllPositions,  // ✅ ADD THIS LINE
+    clearPositions,  // ✅ ADD THIS LINE
     setError,
   };
 }

@@ -53,23 +53,24 @@ const [geminiBalance, setGeminiBalance] = useState({
 });
 
   // ✅ useGemini hook for enhanced Gemini integration
+  
   const {
-    balances: geminiBalances,
-    marketTrades: geminiMarketTrades,
-    openPositions,                          // ✅ ADD THIS (it's in useGemini now)
-    loading: geminiLoading,
-    error: geminiError,
-    isConnected: isGeminiConnected,
-    connect: connectGemini,
-    disconnect: disconnectGemini,
-    fetchBalances: refreshGeminiBalances,
-    fetchMarketTrades: refreshGeminiMarketTrades,
-    fetchOpenPositions,                     // ✅ ADD THIS TOO
-    placeOrder: placeGeminiOrder,
-    setError: setGeminiError,
-    //mode: geminiMode,           // ✅ 'live' | 'sandbox'
-    //setMode: setGeminiMode,     // ✅
-  } = useGemini();
+  balances: geminiBalances,
+  marketTrades: geminiMarketTrades,
+  openPositions,
+  loading: geminiLoading,
+  error: geminiError,
+  isConnected: isGeminiConnected,
+  connect: connectGemini,
+  disconnect: disconnectGemini,
+  fetchBalances: refreshGeminiBalances,
+  fetchMarketTrades: refreshGeminiMarketTrades,
+  fetchOpenPositions,
+  placeOrder: placeGeminiOrder,
+  closeAllPositions,  // ✅ Already there
+  clearPositions,     // ✅ ADD THIS LINE
+  setError: setGeminiError,
+} = useGemini();
 
   // ✅ Manual trading state
   const [showTradeModal, setShowTradeModal] = useState(false);
@@ -1469,28 +1470,46 @@ const handleStartTrading = async () => {
     setFinalProfitLoss(totalProfit);
     setStopReason('Trading stopped manually');
 
-    // ✅ NEW: Close all Gemini positions for selected models
+    // ✅ Close all Gemini positions for selected models
     if (isGeminiConnected && selectedModels.length > 0) {
       for (const modelId of selectedModels) {
         const model = modelsLatest[modelId];
         if (!model) continue;
 
-        // Check if this model has an open position
         const hasPosition = openPositions.some(
           p => p.modelId === modelId && p.symbol.toLowerCase() === (selectedSymbol || 'btcusd').toLowerCase()
         );
 
         if (hasPosition) {
           await handleStopGeminiTrading(model);
-          
-          // Small delay between orders
           await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
+      
+      // ✅ NEW: Clear position tracking after closing
+      await clearPositions();
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    // ✅ STEP 1: Close all open Gemini positions FIRST
+    if (isGeminiConnected && openPositions.length > 0) {
+      const confirmed = window.confirm(
+        `Reset will close all ${openPositions.length} open Gemini positions.\n\nContinue?`
+      );
+      
+      if (!confirmed) return;
+
+      console.log('🧹 Reset: Closing all Gemini positions before clearing state...');
+      
+      // Close all positions
+      await handleStopAllGeminiTrading();
+      
+      // Wait a moment for positions to close
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // ✅ STEP 2: Clear UI state
     setIsTrading(false);
     setTradingStopped(false);
     setStopReason('');
@@ -1507,6 +1526,8 @@ const handleStartTrading = async () => {
     localStorage.removeItem('selectedModels');
     localStorage.removeItem('isTrading');
     localStorage.removeItem('initialValues');
+
+    console.log('✅ Reset complete');
   };
 
   const nonSelectedModels = availableModels.filter((model, idx) => {

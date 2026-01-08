@@ -620,6 +620,41 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
   }
 });
 
+/**
+ * ✅ NEW: Clear all in-memory Gemini positions (for reset/cleanup)
+ * This does NOT place orders, just clears tracking
+ */
+app.post('/api/gemini/clear-positions', (req, res) => {
+  try {
+    const { modelId } = req.body;
+
+    if (modelId) {
+      // Clear positions for specific model
+      const keysToDelete = Object.keys(liveGeminiPositions).filter(key =>
+        key.startsWith(`${modelId}_`)
+      );
+      keysToDelete.forEach(key => delete liveGeminiPositions[key]);
+      console.log(`🧹 Cleared ${keysToDelete.length} positions for model ${modelId}`);
+    } else {
+      // Clear ALL positions
+      const count = Object.keys(liveGeminiPositions).length;
+      Object.keys(liveGeminiPositions).forEach(key => delete liveGeminiPositions[key]);
+      console.log(`🧹 Cleared all ${count} positions`);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Positions cleared from memory',
+    });
+  } catch (err) {
+    console.error('❌ Error clearing positions:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to clear positions',
+    });
+  }
+});
+
 /* ------------------------------
    MODELS INITIAL STATE
 --------------------------------*/
