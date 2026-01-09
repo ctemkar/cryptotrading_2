@@ -3,8 +3,8 @@ import axios from 'axios';
 
 export function useGemini() {
   const [balances, setBalances] = useState([]);
-  const [marketTrades, setMarketTrades] = useState([]);
-  const [openPositions, setOpenPositions] = useState([]); // ✅ NEW: track open positions
+  const [marketTrades, setMarketTrades] = useState({}); // ✅ CHANGED: now an object { btcusd: [...], ethusd: [...], solusd: [...] }
+  const [openPositions, setOpenPositions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -12,6 +12,9 @@ export function useGemini() {
   // Load saved credentials from localStorage
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
   const [apiSecret, setApiSecret] = useState(() => localStorage.getItem('geminiApiSecret') || '');
+
+  // ✅ Default symbols to trade
+  const DEFAULT_SYMBOLS = ['btcusd', 'ethusd', 'solusd'];
 
   // ✅ Function to fetch balances
   const fetchBalances = async (key, secret) => {
@@ -21,7 +24,7 @@ export function useGemini() {
         {
           apiKey: key || apiKey,
           apiSecret: secret || apiSecret,
-          env: 'live', // ✅ Always live
+          env: 'live',
         },
         {
           headers: {
@@ -47,19 +50,29 @@ export function useGemini() {
     }
   };
 
-  // ✅ Function to fetch market trades
-  const fetchMarketTrades = async (symbol = 'btcusd', limit = 20) => {
+  // ✅ Function to fetch market trades for multiple symbols
+  const fetchMarketTrades = async (symbols = DEFAULT_SYMBOLS, limit = 20) => {
     try {
-      const response = await axios.get('/api/gemini/market-trades', {
-        params: { symbol, limit, env: 'live' }
+      const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+      const tradesData = {};
+
+      // Fetch trades for each symbol in parallel
+      const promises = symbolArray.map(async (symbol) => {
+        const response = await axios.get('/api/gemini/market-trades', {
+          params: { symbol, limit, env: 'live' }
+        });
+
+        if (response.data.success) {
+          tradesData[symbol] = response.data.trades;
+        } else {
+          console.warn(`⚠️ Failed to fetch trades for ${symbol}`);
+          tradesData[symbol] = [];
+        }
       });
 
-      if (response.data.success) {
-        setMarketTrades(response.data.trades);
-        return { success: true, data: response.data.trades };
-      } else {
-        throw new Error(response.data.error || 'Failed to fetch market trades');
-      }
+      await Promise.all(promises);
+      setMarketTrades(tradesData);
+      return { success: true, data: tradesData };
     } catch (err) {
       console.error('❌ Error fetching market trades:', err);
       setError(err.response?.data?.error || err.message || 'Failed to fetch market trades');
@@ -67,7 +80,7 @@ export function useGemini() {
     }
   };
 
-  // ✅ NEW: Function to fetch open Gemini positions
+  // ✅ Function to fetch open Gemini positions
   const fetchOpenPositions = async () => {
     try {
       const response = await axios.get('/api/gemini/open-positions');
@@ -86,154 +99,148 @@ export function useGemini() {
 
   // ✅ Function to place an order (BUY or SELL)
   // orderData should include: symbol, side, amount, price, type, modelId, modelName, closePosition
-  // ✅ Function to place an order (BUY or SELL)
-// orderData should include: symbol, side, amount, price, type, modelId, modelName, closePosition
-const placeOrder = async (orderData) => {
-  try {
-    setLoading(true);
-    setError(null);
+  const placeOrder = async (orderData) => {
+    try {
+      setLoading(true);
+      setError(null);
 
-    console.log('📤 placeOrder called with:', orderData);
+      console.log('📤 placeOrder called with:', orderData);
 
-    const payload = {
-      apiKey,
-      apiSecret,
-      env: 'live',   // ✅ Always live
-      ...orderData,  // passes modelId, modelName, closePosition, type, side, etc.
-    };
-
-    console.log('📦 POST /api/gemini/order payload:', payload);
-
-    const response = await axios.post('/api/gemini/order', payload);
-
-    console.log('✅ Gemini order response:', response.data);
-
-    if (response.data.success) {
-      console.log('✅ Gemini order placed successfully:', response.data.order);
-      
-      // Refresh balances and positions after successful order
-      await fetchBalances();
-      await fetchOpenPositions();
-      
-      return { 
-        success: true, 
-        order: response.data.order,
-        positionClose: response.data.positionClose // P&L info if closing
+      const payload = {
+        apiKey,
+        apiSecret,
+        env: 'live',
+        ...orderData,
       };
-    } else {
-      // Return the error from the server
+
+      console.log('📦 POST /api/gemini/order payload:', payload);
+
+      const response = await axios.post('/api/gemini/order', payload);
+
+      console.log('✅ Gemini order response:', response.data);
+
+      if (response.data.success) {
+        console.log('✅ Gemini order placed successfully:', response.data.order);
+        
+        // Refresh balances and positions after successful order
+        await fetchBalances();
+        await fetchOpenPositions();
+        
+        return { 
+          success: true, 
+          order: response.data.order,
+          positionClose: response.data.positionClose
+        };
+      } else {
+        return {
+          success: false,
+          error: response.data.error || 'Failed to place order',
+          reason: response.data.reason,
+          details: response.data.details,
+          geminiReason: response.data.geminiReason,
+          geminiMessage: response.data.geminiMessage,
+        };
+      }
+    } catch (err) {
+      console.error('❌ Error placing order:', err);
+      const errorData = err.response?.data || {};
       return {
         success: false,
-        error: response.data.error || 'Failed to place order',
-        reason: response.data.reason,
-        details: response.data.details,
-        geminiReason: response.data.geminiReason,
-        geminiMessage: response.data.geminiMessage,
+        error: errorData.error || err.message || 'Failed to place order',
+        reason: errorData.reason,
+        details: errorData.details,
+        geminiReason: errorData.geminiReason,
+        geminiMessage: errorData.geminiMessage,
       };
+    } finally {
+      setLoading(false);
     }
-  } catch (err) {
-    console.error('❌ Error placing order:', err);
-    const errorData = err.response?.data || {};
-    return {
-      success: false,
-      error: errorData.error || err.message || 'Failed to place order',
-      reason: errorData.reason,
-      details: errorData.details,
-      geminiReason: errorData.geminiReason,
-      geminiMessage: errorData.geminiMessage,
-    };
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
   // ✅ Function to close all open positions
-const closeAllPositions = async (modelId = null) => {
-  try {
-    setLoading(true);
-    setError(null);
+  const closeAllPositions = async (modelId = null) => {
+    try {
+      setLoading(true);
+      setError(null);
 
-    console.log('🛑 Closing all Gemini positions...', { modelId });
+      console.log('🛑 Closing all Gemini positions...', { modelId });
 
-    const response = await axios.post('/api/gemini/close-open-positions', {
-      apiKey,
-      apiSecret,
-      env: 'live',
-      modelId, // optional: close only for specific model
-    });
+      const response = await axios.post('/api/gemini/close-open-positions', {
+        apiKey,
+        apiSecret,
+        env: 'live',
+        modelId,
+      });
 
-    if (response.data.success) {
-      console.log('✅ Close all positions result:', response.data);
-      
-      // Refresh balances and positions after closing
-      await fetchBalances();
-      await fetchOpenPositions();
-      
+      if (response.data.success) {
+        console.log('✅ Close all positions result:', response.data);
+        
+        await fetchBalances();
+        await fetchOpenPositions();
+        
+        return {
+          success: true,
+          closed: response.data.closed,
+          failed: response.data.failed,
+          errors: response.data.errors || [],
+        };
+      } else {
+        throw new Error(response.data.error || 'Failed to close positions');
+      }
+    } catch (err) {
+      console.error('❌ Error closing all positions:', err);
+      const errorMsg = err.response?.data?.error || err.message || 'Failed to close positions';
+      setError(errorMsg);
       return {
-        success: true,
-        closed: response.data.closed,
-        failed: response.data.failed,
-        errors: response.data.errors || [],
+        success: false,
+        error: errorMsg,
+        closed: 0,
+        failed: 0,
+        errors: [],
       };
-    } else {
-      throw new Error(response.data.error || 'Failed to close positions');
+    } finally {
+      setLoading(false);
     }
-  } catch (err) {
-    console.error('❌ Error closing all positions:', err);
-    const errorMsg = err.response?.data?.error || err.message || 'Failed to close positions';
-    setError(errorMsg);
-    return {
-      success: false,
-      error: errorMsg,
-      closed: 0,
-      failed: 0,
-      errors: [],
-    };
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
-// ✅ Function to clear position tracking (for reset)
-const clearPositions = async (modelId = null) => {
-  try {
-    const response = await axios.post('/api/gemini/clear-positions', {
-      modelId, // optional: clear only for specific model
-    });
+  // ✅ Function to clear position tracking (for reset)
+  const clearPositions = async (modelId = null) => {
+    try {
+      const response = await axios.post('/api/gemini/clear-positions', {
+        modelId,
+      });
 
-    if (response.data.success) {
-      console.log('✅ Positions cleared from backend');
-      await fetchOpenPositions(); // refresh UI
-      return { success: true };
-    } else {
-      throw new Error(response.data.error || 'Failed to clear positions');
+      if (response.data.success) {
+        console.log('✅ Positions cleared from backend');
+        await fetchOpenPositions();
+        return { success: true };
+      } else {
+        throw new Error(response.data.error || 'Failed to clear positions');
+      }
+    } catch (err) {
+      console.error('❌ Error clearing positions:', err);
+      return {
+        success: false,
+        error: err.response?.data?.error || err.message || 'Failed to clear positions',
+      };
     }
-  } catch (err) {
-    console.error('❌ Error clearing positions:', err);
-    return {
-      success: false,
-      error: err.response?.data?.error || err.message || 'Failed to clear positions',
-    };
-  }
-};
+  };
 
   // ✅ Function to connect (save credentials and fetch initial data)
-  const connect = async (key, secret, symbol = 'btcusd') => {
+  const connect = async (key, secret) => {
     setLoading(true);
     setError(null);
 
-    // Save to state and localStorage
     setApiKey(key);
     setApiSecret(secret);
     localStorage.setItem('geminiApiKey', key);
     localStorage.setItem('geminiApiSecret', secret);
 
-    // Fetch balances to verify connection
     const result = await fetchBalances(key, secret);
 
     if (result.success) {
-      // Also fetch initial market trades and open positions
-      await fetchMarketTrades(symbol);
+      // Fetch market trades for all default symbols
+      await fetchMarketTrades(DEFAULT_SYMBOLS);
       await fetchOpenPositions();
       console.log('✅ Connected to Gemini successfully');
     }
@@ -247,7 +254,7 @@ const clearPositions = async (modelId = null) => {
     setApiKey('');
     setApiSecret('');
     setBalances([]);
-    setMarketTrades([]);
+    setMarketTrades({});
     setOpenPositions([]);
     setIsConnected(false);
     setError(null);
@@ -261,7 +268,7 @@ const clearPositions = async (modelId = null) => {
     if (apiKey && apiSecret) {
       console.log('🔄 Auto-connecting to Gemini...');
       fetchBalances();
-      fetchMarketTrades('btcusd');
+      fetchMarketTrades(DEFAULT_SYMBOLS);
       fetchOpenPositions();
     }
   }, []);
@@ -277,25 +284,37 @@ const clearPositions = async (modelId = null) => {
     return () => clearInterval(interval);
   }, [isConnected]);
 
+  // ✅ Poll market trades every 10 seconds when connected
+  useEffect(() => {
+    if (!isConnected) return;
+
+    const interval = setInterval(() => {
+      fetchMarketTrades(DEFAULT_SYMBOLS);
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [isConnected]);
+
   return {
     // State
     balances,
     marketTrades,
-    openPositions,      // ✅ NEW: expose open positions
+    openPositions,
     loading,
     error,
     isConnected,
+    DEFAULT_SYMBOLS, // ✅ NEW: expose default symbols
     
     // Functions
     connect,
     disconnect,
     fetchBalances,
     fetchMarketTrades,
-    fetchOpenPositions, // ✅ NEW: expose fetch function
+    fetchOpenPositions,
     placeOrder,
-    placeGeminiOrder: placeOrder,  // ✅ ADD THIS LINE (alias)
-    closeAllPositions,  // ✅ ADD THIS LINE
-    clearPositions,  // ✅ ADD THIS LINE
+    placeGeminiOrder: placeOrder,
+    closeAllPositions,
+    clearPositions,
     setError,
   };
 }

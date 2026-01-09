@@ -269,6 +269,11 @@ function livePosKey(modelId, symbol) {
   return `${modelId}_${symbol.toLowerCase()}`;
 }
 
+function hasOpenPosition(modelId, symbol) {
+  const key = livePosKey(modelId, symbol);
+  return !!liveGeminiPositions[key];
+}
+
 function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price, side }) {
   const key = livePosKey(modelId, symbol);
   liveGeminiPositions[key] = {
@@ -1501,6 +1506,20 @@ app.post("/api/gemini/order", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Amount must be a positive number"
+      });
+    }
+
+    // ✅ NEW: Check if model already has an open position for this symbol (when NOT closing)
+    if (!closePosition && modelId && hasOpenPosition(modelId, symbol)) {
+      const existingPos = liveGeminiPositions[livePosKey(modelId, symbol)];
+      console.warn(`⚠️ ${modelName} already has an open ${existingPos.side} position for ${symbol.toUpperCase()}`);
+      return res.status(400).json({
+        success: false,
+        error: `${modelName} already has an open position for ${symbol.toUpperCase()}`,
+        reason: 'duplicate_position',
+        details: {
+          existingPosition: existingPos
+        }
       });
     }
 
