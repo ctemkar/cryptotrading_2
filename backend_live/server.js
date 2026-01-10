@@ -410,7 +410,7 @@ app.get('/api/gemini/open-positions', (req, res) => {
  * Body: { apiKey, apiSecret, env, modelId? }
  */
 app.post('/api/gemini/close-open-positions', async (req, res) => {
-  console.log('🔥 /api/gemini/close-open-positions HIT', req.body);  // <– ADD THIS
+  console.log('🔥 /api/gemini/close-open-positions HIT', req.body);
   try {
     const { apiKey, apiSecret, env = 'live', modelId } = req.body;
 
@@ -497,7 +497,7 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           continue; // Skip this position
         }
 
-        // ✅ STEP 4: Get fresh market price
+        // ✅ STEP 4: Get fresh market price (for P&L calculation only)
         const exitPrice = await getGeminiPrice(symbol, env);
         if (!exitPrice) {
           throw new Error(`Could not fetch price for ${symbol}`);
@@ -523,21 +523,11 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           continue;
         }
 
-        // ✅ STEP 6: Buffered limit price so it behaves like market but likely fills
-        let limitPrice = exitPrice;
-        if (closingSide === 'sell') {
-          // Closing LONG – accept slightly lower price
-          limitPrice = exitPrice * 0.999;   // 0.1% lower
-        } else {
-          // Closing SHORT – pay slightly more
-          limitPrice = exitPrice * 1.001;   // 0.1% higher
-        }
-
         console.log(
-          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}, limitPrice=${limitPrice}`,
+          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}, using MARKET order for guaranteed fill`,
         );
 
-        // ✅ STEP 7: Place order on Gemini with correct closing side
+        // ✅ STEP 6: Place MARKET order on Gemini for guaranteed close
         const order = await geminiRequest(
           apiKey,
           apiSecret,
@@ -545,17 +535,15 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
           {
             symbol: symbol.toLowerCase(),
             amount: closeAmount.toString(),
-            price: limitPrice.toFixed(2),
             side: closingSide,
-            type: 'exchange limit',
-            options: ['immediate-or-cancel'],
+            type: 'exchange market', // 🔥 MARKET order = guaranteed execution
             env,
           },
         );
 
         console.log('✅ Close order placed:', order.order_id);
 
-        // ✅ STEP 8: Wait 1 second and check order status
+        // ✅ STEP 7: Wait and check order status
         await new Promise(r => setTimeout(r, 1000));
 
         const status = await geminiRequest(apiKey, apiSecret, '/v1/order/status', {
@@ -572,21 +560,58 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
 
         const executed = parseFloat(status.executed_amount || '0');
 
-        // ✅ STEP 9: Only record/adjust if something actually executed
+        // ✅ STEP 8: Verify execution
         if (!status.is_live && executed > 0) {
           const closingInfo = await closeLiveGeminiPositionAndRecord({
             modelId: mId,
             modelName,
             symbol,
-            amount: executed,   // use actually executed amount
+            amount: executed,
             exitPrice,
           });
           console.log('✅ Position close recorded:', closingInfo);
           closed++;
         } else {
-          throw new Error(
-            `Close order not filled (is_live: ${status.is_live}, executed: ${status.executed_amount})`
+          // 🔥 RETRY ONCE if market order somehow didn't fill
+          console.warn(`⚠️ First close attempt didn't fill. Retrying...`);
+          
+          const retryOrder = await geminiRequest(
+            apiKey,
+            apiSecret,
+            '/v1/order/new',
+            {
+              symbol: symbol.toLowerCase(),
+              amount: closeAmount.toString(),
+              side: closingSide,
+              type: 'exchange market',
+              env,
+            },
           );
+          
+          await new Promise(r => setTimeout(r, 1000));
+          
+          const retryStatus = await geminiRequest(apiKey, apiSecret, '/v1/order/status', {
+            order_id: retryOrder.order_id,
+            env,
+          });
+          
+          const retryExecuted = parseFloat(retryStatus.executed_amount || '0');
+          
+          if (!retryStatus.is_live && retryExecuted > 0) {
+            const closingInfo = await closeLiveGeminiPositionAndRecord({
+              modelId: mId,
+              modelName,
+              symbol,
+              amount: retryExecuted,
+              exitPrice,
+            });
+            console.log('✅ Position closed on retry:', closingInfo);
+            closed++;
+          } else {
+            throw new Error(
+              `Close failed after retry (is_live: ${retryStatus.is_live}, executed: ${retryStatus.executed_amount})`
+            );
+          }
         }
 
       } catch (err) {
@@ -609,6 +634,29 @@ app.post('/api/gemini/close-open-positions', async (req, res) => {
       }
     }
     // ================== END MAIN LOOP ==================
+
+    // 🔥 FINAL STEP: Verify with Gemini's source of truth
+    console.log('🔍 Verifying with Gemini /v1/positions...');
+    try {
+      const geminiPositions = await geminiRequest(apiKey, apiSecret, '/v1/positions', { env });
+      
+      const stillOpen = geminiPositions.filter(p => {
+        const amt = parseFloat(p.amount || '0');
+        return amt !== 0;
+      });
+      
+      if (stillOpen.length > 0) {
+        console.warn('⚠️ Gemini still reports open positions:', stillOpen);
+        errors.push({
+          message: 'Some positions still open on Gemini after close attempts',
+          geminiPositions: stillOpen,
+        });
+      } else {
+        console.log('✅ Gemini confirms: all positions closed');
+      }
+    } catch (err) {
+      console.error('❌ Failed to verify positions:', err.message);
+    }
 
     return res.json({
       success: true,
@@ -1561,25 +1609,36 @@ app.post("/api/gemini/order", async (req, res) => {
     );
 
     // ✅ Prepare order payload
+   // ✅ Prepare order payload
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: amount.toString(),
       side: side.toLowerCase(),
-      type: type,
     };
 
-    // ✅ Only add price + options for limit orders
-    if (type.includes('limit')) {
-      const numericPrice = Number(price);
+    // ✅ NEW: Use MARKET orders when closing, LIMIT when opening
+    if (closePosition) {
+      // 🔥 CLOSING: Use market order for guaranteed execution
+      orderPayload.type = 'exchange market';
+      delete orderPayload.price;
+      delete orderPayload.options;
+      console.log(`🔻 Using MARKET order to close position (guaranteed fill)`);
+    } else { 
+      // 🔥 OPENING: Use limit order with IOC
+      orderPayload.type = type || 'exchange limit';
       
-      if (!numericPrice || numericPrice <= 0) {
-        throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
+      if (orderPayload.type.includes('limit')) {
+        const numericPrice = Number(price);
+        
+        if (!numericPrice || numericPrice <= 0) {
+          throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
+        }
+
+        orderPayload.price = numericPrice.toString();
+        orderPayload.options = ['immediate-or-cancel'];
+        console.log(`🔺 Using LIMIT order with IOC to open position (price: ${numericPrice})`);
       }
-
-      orderPayload.price = numericPrice.toString();
-      orderPayload.options = ['immediate-or-cancel'];
     }
-
     console.log('📤 Sending to Gemini:', orderPayload);
 
     // Call Gemini API to place order
