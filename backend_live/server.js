@@ -409,269 +409,145 @@ app.get('/api/gemini/open-positions', (req, res) => {
  * Close all open Gemini positions for a given model (or all models)
  * Body: { apiKey, apiSecret, env, modelId? }
  */
-app.post('/api/gemini/close-open-positions', async (req, res) => {
-  console.log('🔥 /api/gemini/close-open-positions HIT', req.body);
-  try {
-    const { apiKey, apiSecret, env = 'live', modelId } = req.body;
 
+/**
+ * Close all open Gemini positions for a given model (or all models)
+ * Body: { apiKey, apiSecret, env='live', modelId? }
+ */
+app.post('/api/gemini/close-all', async (req, res) => {
+  try {
+    const { apiKey, apiSecret, env = 'live', modelId } = req.body || {};
+
+    // Validate credentials
     if (!apiKey || !apiSecret) {
       return res.status(400).json({
         success: false,
         error: 'API Key and API Secret are required',
+        reason: 'missing_credentials',
       });
     }
 
-    // Filter in‑memory positions
+    // Collect positions to close
     const allPositions = Object.values(liveGeminiPositions);
     const positionsToClose = modelId
       ? allPositions.filter(p => p.modelId === modelId)
       : allPositions;
 
-    if (positionsToClose.length === 0) {
-      return res.json({
-        success: true,
-        closed: 0,
-        failed: 0,
-        errors: [],
-        message: 'No open positions to close',
-      });
-    }
-
-    // ✅ STEP 1: Fetch REAL balances from Gemini FIRST (for logging / sanity)
-    console.log('📊 Fetching real Gemini balances before closing...');
-    let geminiBalances = {};
-    try {
-      const balancesRaw = await geminiRequest(apiKey, apiSecret, '/v1/balances', { env });
-      balancesRaw.forEach(b => {
-        const curr = b.currency.toLowerCase();
-        const avail = parseFloat(b.available) || 0;
-        if (avail > 0) {
-          geminiBalances[curr] = avail;
-        }
-      });
-      console.log('💰 Real Gemini balances:', geminiBalances);
-    } catch (err) {
-      console.error('❌ Failed to fetch balances:', err.message);
-      return res.status(500).json({
+    if (!positionsToClose.length) {
+      return res.status(400).json({
         success: false,
-        error: 'Failed to fetch Gemini balances before closing positions',
+        error: modelId
+          ? `No open positions found for model ${modelId}`
+          : 'No open positions found',
+        reason: 'no_open_positions',
       });
     }
 
-    let closed = 0;
+    const results = [];
     const errors = [];
 
-    // ================== MAIN LOOP ==================
     for (const pos of positionsToClose) {
       try {
-        const { modelId: mId, modelName, symbol, amount } = pos;
+        const symbol = pos.symbol.toLowerCase(); // stored lower already
+        const closeSide = pos.side === 'LONG' ? 'sell' : 'buy';
 
-        // ✅ STEP 2: Use position size as target close amount
-        const positionAmount = parseFloat(amount);
+        // Market close for guaranteed fill
+        const orderPayload = {
+          symbol,
+          amount: String(pos.amount),
+          side: closeSide,
+          type: 'exchange market',
+          env,
+          account: 'primary',
+        };
 
-        // Optional: still log available balance for debugging
-        const symbolBase = symbol.toLowerCase().replace('usd', '');
-        const availableBalance = geminiBalances[symbolBase] || 0;
-        console.log(
-          `🔍 Position: ${modelName} ${symbol}, position amount: ${positionAmount}, available balance: ${availableBalance}`,
-        );
+        const order = await geminiRequest(apiKey, apiSecret, '/v1/order/new', orderPayload);
 
-        let closeAmount = positionAmount;
+        const executed = parseFloat(order.executed_amount || '0');
+        const isLive = !!order.is_live;
 
-        // ✅ STEP 3: Validate minimum order size
-        const validation = validateOrderAmount(symbol, closeAmount);
-        if (!validation.valid) {
-          console.warn(`⚠️ Cannot close ${modelName} ${symbol}: ${validation.error}`);
+        if (isLive || executed <= 0) {
+          // Gemini accepted but didn't fill yet (or filled 0)
           errors.push({
-            modelId: mId,
-            modelName,
-            symbol,
-            message: validation.error,
-            reason: 'amount_below_minimum',
+            modelId: pos.modelId,
+            modelName: pos.modelName,
+            symbol: symbol.toUpperCase(),
+            error: `Close order not filled yet (is_live=${isLive}, executed=${executed})`,
+            reason: 'not_filled',
             details: {
-              attempted: validation.attempted,
-              minimum: validation.minRequired,
-              available: availableBalance,
+              order_id: order.order_id,
+              is_live: order.is_live,
+              executed_amount: order.executed_amount,
+              remaining_amount: order.remaining_amount,
             },
-          });
-          continue; // Skip this position
-        }
-
-        // ✅ STEP 4: Get fresh market price (for P&L calculation only)
-        const exitPrice = await getGeminiPrice(symbol, env);
-        if (!exitPrice) {
-          throw new Error(`Could not fetch price for ${symbol}`);
-        }
-
-        // ✅ STEP 5: Determine closing side based on position side
-        const positionSide = (pos.side || 'LONG').toUpperCase();
-        let closingSide;
-        if (positionSide === 'LONG') {
-          closingSide = 'sell'; // Close LONG with SELL
-        } else if (positionSide === 'SHORT') {
-          closingSide = 'buy';  // Close SHORT with BUY
-        } else {
-          const msg = `Unknown position side: ${pos.side}`;
-          console.warn(`⚠️ ${msg}`);
-          errors.push({
-            modelId: mId,
-            modelName,
-            symbol,
-            message: msg,
-            reason: 'unknown_side',
           });
           continue;
         }
 
-        console.log(
-          `🔻 Closing ${positionSide} position: model=${modelName}, symbol=${symbol}, amount=${closeAmount}, side=${closingSide}, using MARKET order for guaranteed fill`,
-        );
+        const exitPrice = parseFloat(order.avg_execution_price || order.price || '0');
 
-        // ✅ STEP 6: Place MARKET order on Gemini for guaranteed close
-        const order = await geminiRequest(
-          apiKey,
-          apiSecret,
-          '/v1/order/new',
-          {
-            symbol: symbol.toLowerCase(),
-            amount: closeAmount.toString(),
-            side: closingSide,
-            type: 'exchange market', // 🔥 MARKET order = guaranteed execution
-            env,
-          },
-        );
+        const closingInfo = await closeLiveGeminiPositionAndRecord({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol,
+          amount: executed,     // use executed for accurate P&L
+          exitPrice: exitPrice,
+        });
 
-        console.log('✅ Close order placed:', order.order_id);
-
-        // ✅ STEP 7: Wait and check order status
-        await new Promise(r => setTimeout(r, 1000));
-
-        const status = await geminiRequest(apiKey, apiSecret, '/v1/order/status', {
+        results.push({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol: symbol.toUpperCase(),
+          side: pos.side,
+          closingAction: closeSide.toUpperCase(),
+          entryPrice: closingInfo?.entryPrice,
+          exitPrice: closingInfo?.exitPrice,
+          quantity: closingInfo?.quantity,
+          pnl: closingInfo?.pnl,
+          timestamp: closingInfo?.timestamp,
           order_id: order.order_id,
-          env,
         });
-
-        console.log('📋 Order status:', {
-          order_id: status.order_id,
-          is_live: status.is_live,
-          executed_amount: status.executed_amount,
-          original_amount: status.original_amount,
-        });
-
-        const executed = parseFloat(status.executed_amount || '0');
-
-        // ✅ STEP 8: Verify execution
-        if (!status.is_live && executed > 0) {
-          const closingInfo = await closeLiveGeminiPositionAndRecord({
-            modelId: mId,
-            modelName,
-            symbol,
-            amount: executed,
-            exitPrice,
-          });
-          console.log('✅ Position close recorded:', closingInfo);
-          closed++;
-        } else {
-          // 🔥 RETRY ONCE if market order somehow didn't fill
-          console.warn(`⚠️ First close attempt didn't fill. Retrying...`);
-          
-          const retryOrder = await geminiRequest(
-            apiKey,
-            apiSecret,
-            '/v1/order/new',
-            {
-              symbol: symbol.toLowerCase(),
-              amount: closeAmount.toString(),
-              side: closingSide,
-              type: 'exchange market',
-              env,
-            },
-          );
-          
-          await new Promise(r => setTimeout(r, 1000));
-          
-          const retryStatus = await geminiRequest(apiKey, apiSecret, '/v1/order/status', {
-            order_id: retryOrder.order_id,
-            env,
-          });
-          
-          const retryExecuted = parseFloat(retryStatus.executed_amount || '0');
-          
-          if (!retryStatus.is_live && retryExecuted > 0) {
-            const closingInfo = await closeLiveGeminiPositionAndRecord({
-              modelId: mId,
-              modelName,
-              symbol,
-              amount: retryExecuted,
-              exitPrice,
-            });
-            console.log('✅ Position closed on retry:', closingInfo);
-            closed++;
-          } else {
-            throw new Error(
-              `Close failed after retry (is_live: ${retryStatus.is_live}, executed: ${retryStatus.executed_amount})`
-            );
-          }
-        }
-
       } catch (err) {
-        console.error('❌ Failed to close position:', {
-          symbol: pos.symbol,
-          model: pos.modelName,
-          message: err.message,
-          data: err.response?.data,
-        });
-
-        const geminiError = err.response?.data;
+        const data = err.response?.data || {};
         errors.push({
           modelId: pos.modelId,
           modelName: pos.modelName,
-          symbol: pos.symbol,
-          message: err.message,
-          reason: geminiError?.reason || 'unknown',
-          details: geminiError || null,
+          symbol: String(pos.symbol || '').toUpperCase(),
+          error: data.message || data.reason || err.message || 'Failed to close position',
+          reason: data.reason || 'close_failed',
+          details: data,
         });
       }
     }
-    // ================== END MAIN LOOP ==================
 
-    // 🔥 FINAL STEP: Verify with Gemini's source of truth
-    console.log('🔍 Verifying with Gemini /v1/positions...');
-    try {
-      const geminiPositions = await geminiRequest(apiKey, apiSecret, '/v1/positions', { env });
-      
-      const stillOpen = geminiPositions.filter(p => {
-        const amt = parseFloat(p.amount || '0');
-        return amt !== 0;
+    // If everything failed, surface as error
+    if (!results.length) {
+      return res.status(500).json({
+        success: false,
+        error: errors[0]?.error || 'Failed to close positions',
+        reason: 'all_failed',
+        results: [],
+        errors,
       });
-      
-      if (stillOpen.length > 0) {
-        console.warn('⚠️ Gemini still reports open positions:', stillOpen);
-        errors.push({
-          message: 'Some positions still open on Gemini after close attempts',
-          geminiPositions: stillOpen,
-        });
-      } else {
-        console.log('✅ Gemini confirms: all positions closed');
-      }
-    } catch (err) {
-      console.error('❌ Failed to verify positions:', err.message);
     }
 
+    // Partial success is still success=true, but return errors too
     return res.json({
       success: true,
-      closed,
-      failed: positionsToClose.length - closed,
-      errors,
+      message: `Closed ${results.length} position(s)`,
+      results,
+      errors, // <-- important for your UI logs
     });
   } catch (err) {
-    console.error('❌ Error in /api/gemini/close-open-positions:', err);
+    console.error('❌ /api/gemini/close-all error:', err);
     return res.status(500).json({
       success: false,
-      error: 'Failed to close open positions',
+      error: err.message || 'Failed to close positions',
+      reason: 'server_error',
     });
   }
 });
+ 
 
 /**
  * ✅ NEW: Clear all in-memory Gemini positions (for reset/cleanup)
