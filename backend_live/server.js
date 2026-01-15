@@ -258,6 +258,27 @@ async function getGeminiPrice(symbol, env = 'live') {
   }
 }
 
+async function getGeminiTicker(symbol, env = 'live') {
+  const baseUrl =
+    env === 'sandbox'
+      ? 'https://api.sandbox.gemini.com'
+      : 'https://api.gemini.com';
+
+  const url = `${baseUrl}/v1/pubticker/${symbol}`;
+  const res = await axios.get(url, { timeout: 8000 });
+
+  return {
+    bid: parseFloat(res.data.bid),
+    ask: parseFloat(res.data.ask),
+    last: parseFloat(res.data.last),
+  };
+}
+
+function toUsdPrice2(n) {
+  // Gemini USD pairs typically accept 2 decimals; keep it simple.
+  return (Math.round(Number(n) * 100) / 100).toFixed(2);
+}
+
 /* -----------------------------------------
    LIVE GEMINI POSITION TRACKING (IN-MEMORY)
 ------------------------------------------*/
@@ -451,15 +472,33 @@ app.post('/api/gemini/close-all', async (req, res) => {
         const symbol = pos.symbol.toLowerCase(); // stored lower already
         const closeSide = pos.side === 'LONG' ? 'sell' : 'buy';
 
-        // Market close for guaranteed fill
+        // ✅ IOC LIMIT close (Gemini rejects exchange market for you)
+        const t = await getGeminiTicker(symbol, env);
+
+        const isSell = closeSide === 'sell'; // sell closes LONG, buy closes SHORT
+        const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
+
+        if (!basePx || basePx <= 0) {
+          throw new Error(`No valid ticker price for ${symbol} (${env})`);
+        }
+
+        // ✅ Nudge price with 3% slippage so it fills immediately like a market order
+        const px = isSell ? basePx * 0.97 : basePx * 1.03;
+
         const orderPayload = {
           symbol,
           amount: String(pos.amount),
           side: closeSide,
-          type: 'exchange market',
+          type: 'exchange limit',
+          price: toUsdPrice2(px),
+          options: ['immediate-or-cancel'],
           env,
           account: 'primary',
         };
+
+        console.log(
+          `🔻 Closing ${pos.modelName} ${symbol.toUpperCase()} ${pos.side} (${closeSide.toUpperCase()}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask})`
+        );
 
         const order = await geminiRequest(apiKey, apiSecret, '/v1/order/new', orderPayload);
 
@@ -546,8 +585,7 @@ app.post('/api/gemini/close-all', async (req, res) => {
       reason: 'server_error',
     });
   }
-});
- 
+}); 
 
 /**
  * ✅ NEW: Clear all in-memory Gemini positions (for reset/cleanup)
@@ -597,7 +635,7 @@ const MODELS = [
   { id: "grok",              name: "Grok",                    color: "#ff9800", volatility: 0.7 }
 ];
 
-const STARTING_VALUE = 1000;
+const STARTING_VALUE = 100;
 const MAX_HISTORY = 200;
 
 let modelState = {};
@@ -1367,7 +1405,7 @@ app.post("/api/gemini/order", async (req, res) => {
   try {
     // LOG 1: raw body
     console.log('📥 /api/gemini/order RAW body:', req.body);
-    
+
     const {
       apiKey,
       apiSecret,
@@ -1382,6 +1420,8 @@ app.post("/api/gemini/order", async (req, res) => {
       env = 'live',
     } = req.body;
 
+    const isClosing = (closePosition === true || closePosition === 'true');
+
     // LOG 2: parsed fields
     console.log('📥 /api/gemini/order parsed:', {
       apiKey: apiKey ? '[provided]' : '[missing]',
@@ -1394,6 +1434,7 @@ app.post("/api/gemini/order", async (req, res) => {
       modelId,
       modelName,
       closePosition,
+      isClosing,
       env,
     });
 
@@ -1434,7 +1475,7 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     // ✅ NEW: Check if model already has an open position for this symbol (when NOT closing)
-    if (!closePosition && modelId && hasOpenPosition(modelId, symbol)) {
+    if (!isClosing && modelId && hasOpenPosition(modelId, symbol)) {
       const existingPos = liveGeminiPositions[livePosKey(modelId, symbol)];
       console.warn(`⚠️ ${modelName} already has an open ${existingPos.side} position for ${symbol.toUpperCase()}`);
       return res.status(400).json({
@@ -1451,7 +1492,7 @@ app.post("/api/gemini/order", async (req, res) => {
     console.log('🔍 Validating order amount:', { symbol, amount });
     const validation = validateOrderAmount(symbol, amount);
     console.log('🔍 Validation result:', validation);
-    
+
     if (!validation.valid) {
       console.warn(`⚠️ Order rejected: ${validation.error}`);
       return res.status(400).json({
@@ -1466,8 +1507,8 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // ✅ Validate price for limit orders
-    if (type.includes('limit')) {
+    // ✅ Validate price for limit orders (ONLY when opening)
+    if (!isClosing && type.includes('limit')) {
       const priceNum = parseFloat(price);
       if (!price || isNaN(priceNum) || priceNum <= 0) {
         console.error('❌ Validation failed: Invalid price for limit order', { price, priceNum });
@@ -1481,40 +1522,58 @@ app.post("/api/gemini/order", async (req, res) => {
     console.log(
       `🔗 [${env.toUpperCase()}] Placing ${side} order: ${amount} ${symbol} @ $${price} (model: ${
         modelName || 'N/A'
-      }, close=${!!closePosition})`
+      }, close=${isClosing})`
     );
 
-    // ✅ Prepare order payload
-   // ✅ Prepare order payload
+    // ✅ Prepare order payload (Gemini fields)
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: amount.toString(),
       side: side.toLowerCase(),
     };
 
-    // ✅ NEW: Use MARKET orders when closing, LIMIT when opening
-    if (closePosition) {
-      // 🔥 CLOSING: Use market order for guaranteed execution
-      orderPayload.type = 'exchange market';
-      delete orderPayload.price;
-      delete orderPayload.options;
-      console.log(`🔻 Using MARKET order to close position (guaranteed fill)`);
-    } else { 
-      // 🔥 OPENING: Use limit order with IOC
+    // ✅ CLOSING: Use IOC LIMIT to simulate market (Gemini rejects exchange market for you)
+    if (isClosing) {
+      const t = await getGeminiTicker(symbol, env);
+
+      const isSell = side.toLowerCase() === 'sell'; // sell closes LONG, buy closes SHORT
+      const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
+
+      if (!basePx || basePx <= 0) {
+        throw new Error(`No valid ticker price for ${symbol} (${env})`);
+      }
+
+      // Nudge price so it fills immediately like a market order:
+      // SELL => below bid; BUY => above ask.
+      const px = isSell ? basePx * 0.97 : basePx * 1.03;
+
+      orderPayload.type = 'exchange limit';
+      orderPayload.price = toUsdPrice2(px);
+
+      // ✅ IOC ONLY when closing
+      orderPayload.options = ['immediate-or-cancel'];
+
+      console.log(
+        `🔻 Using IOC LIMIT to close position (${isSell ? 'SELL' : 'BUY'}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask}, last=${t.last})`
+      );
+    } else {
+      // ✅ OPENING: Use limit order WITHOUT IOC (prevents "IOC canceled" emails on opens)
       orderPayload.type = type || 'exchange limit';
-      
+
       if (orderPayload.type.includes('limit')) {
         const numericPrice = Number(price);
-        
+
         if (!numericPrice || numericPrice <= 0) {
           throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
         }
 
         orderPayload.price = numericPrice.toString();
-        orderPayload.options = ['immediate-or-cancel'];
-        console.log(`🔺 Using LIMIT order with IOC to open position (price: ${numericPrice})`);
+
+        // ❌ IMPORTANT: do NOT set orderPayload.options = ['immediate-or-cancel'] here
+        console.log(`🔺 Using LIMIT order to open position (NO IOC) (price: ${numericPrice})`);
       }
     }
+
     console.log('📤 Sending to Gemini:', orderPayload);
 
     // Call Gemini API to place order
@@ -1534,7 +1593,7 @@ app.post("/api/gemini/order", async (req, res) => {
     // ====== POSITION OPEN / CLOSE LOGIC ======
 
     // ✅ When we BUY and NOT closing => open LONG position
-    if (side.toLowerCase() === 'buy' && !closePosition && modelId && modelName) {
+    if (side.toLowerCase() === 'buy' && !isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
 
@@ -1565,7 +1624,7 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     // ✅ When we SELL and NOT closing => open SHORT position
-    if (side.toLowerCase() === 'sell' && !closePosition && modelId && modelName) {
+    if (side.toLowerCase() === 'sell' && !isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
 
@@ -1595,9 +1654,9 @@ app.post("/api/gemini/order", async (req, res) => {
       }
     }
 
-    // ✅ When closing (BUY to close SHORT, or SELL to close LONG) => close live position + log P&L
+    // ✅ When closing => close live position + log P&L
     let closingInfo = null;
-    if (closePosition && modelId && modelName) {
+    if (isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
 
@@ -1613,7 +1672,7 @@ app.post("/api/gemini/order", async (req, res) => {
       if (!isLive && executed > 0) {
         const qtyForPnl = executed;
         const exitPrice = parseFloat(order.avg_execution_price || order.price || price);
-        
+
         closingInfo = await closeLiveGeminiPositionAndRecord({
           modelId,
           modelName,
@@ -1621,7 +1680,7 @@ app.post("/api/gemini/order", async (req, res) => {
           amount: qtyForPnl,
           exitPrice: exitPrice,
         });
-        
+
         console.log(
           `✅ Position closed and recorded: ${modelName} ${symbol}, ` +
           `qty=${qtyForPnl}, exit=${exitPrice}, P&L: ${closingInfo?.pnl ?? 'N/A'}`
@@ -1659,17 +1718,17 @@ app.post("/api/gemini/order", async (req, res) => {
   } catch (error) {
     console.error('❌ /api/gemini/order UNCAUGHT ERROR:', error);
     console.error(`❌ [${req.body?.env?.toUpperCase() || 'LIVE'}] Error placing order:`, error.message);
-    
+
     const geminiError = error.response?.data;
     console.error("❌ Full Gemini error:", geminiError);
 
     if (error.response) {
       const status = error.response.status;
       const data = error.response.data || {};
-      
+
       let userFriendlyError = data.message || data.reason || "Failed to place order";
       let errorReason = data.reason || 'unknown';
-      
+
       if (data.reason === 'InsufficientFunds') {
         userFriendlyError = `Insufficient funds to place this order. Please check your ${req.body.symbol?.toUpperCase()} balance.`;
       } else if (data.reason === 'InvalidQuantity' || data.message?.includes('below minimum')) {
@@ -1681,7 +1740,7 @@ app.post("/api/gemini/order", async (req, res) => {
         userFriendlyError = `Invalid price for ${req.body.symbol?.toUpperCase()}: ${data.message || 'Price must be positive'}`;
         errorReason = 'invalid_price';
       }
-      
+
       return res.status(status).json({
         success: false,
         error: userFriendlyError,

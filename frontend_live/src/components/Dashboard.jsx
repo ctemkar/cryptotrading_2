@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import LiveMultiChart from './LiveMultiChart';
 import ModelsComparisonChart from './ModelsComparisonChart';
 import useModels from '../hooks/useModels';
 import useCryptoPrices from '../hooks/useCryptoPrices';
 import { useGemini } from '../hooks/useGemini';
+import { fetchGeminiBalances } from '../hooks/useGemini';
 import socket from '../services/socket';
 import axios from 'axios';
 
@@ -130,7 +131,7 @@ const addLog = (a, b = 'info') => {
   // ✅ Track the last user-set starting value separately
   const [lastSetStartingValue, setLastSetStartingValue] = useState(() => {
     const saved = localStorage.getItem('lastSetStartingValue');
-    return saved || '1000';
+    return saved || '100';
   });
 
   // Load saved values from localStorage or use defaults
@@ -138,7 +139,7 @@ const addLog = (a, b = 'info') => {
   const [profitTarget, setProfitTarget] = useState(() => localStorage.getItem('profitTarget') || '');
   const [startingValue, setStartingValue] = useState(() => {
     const saved = localStorage.getItem('startingValue');
-    return saved || '1000';
+    return saved || '100';
   });
   const [isTrading, setIsTrading] = useState(() => {
     const saved = localStorage.getItem('isTrading');
@@ -162,8 +163,12 @@ const addLog = (a, b = 'info') => {
   const { latest: cryptoLatest, history: cryptoHistory } = useCryptoPrices();
 
   const availableModels = Object.values(modelsLatest);
-  const startValue = parseFloat(startingValue) || 1000;
+  const startValue = parseFloat(startingValue) || 100;
   const currentPrice = cryptoLatest.BTCUSDT || null;
+
+  // ✅ Add refs to hold the "live" values
+const stopLossRef = useRef(parseFloat(stopLoss) || 2.0);
+const profitTargetRef = useRef(parseFloat(profitTarget) || 5.0);
 
   // ========================================
 // 🚀 GEMINI LIVE TRADING HANDLERS - ADD HERE
@@ -193,6 +198,10 @@ const getCurrentPrice = (symbol) => {
 /**
  * ✅ NEW: Model decides symbol AND direction automatically
  */
+
+// ✅ Helper to check if there's ANY open position
+const hasOpenPosition = (openPositions || []).length > 0;
+
 const handleStartGeminiTrading = async (model) => {
   if (!isGeminiConnected) {
     addLog('Gemini not connected. Cannot start.', 'error');
@@ -221,6 +230,13 @@ const handleStartGeminiTrading = async (model) => {
   );
 
   const { symbol, price, direction } = bestPick;
+
+  // ✅ BLOCK SELL (SHORT) IF NO POSITION EXISTS
+  if (direction === 'sell' && !hasOpenPosition) {
+    addLog('info', '🚫 Skipping SHORT signal (Spot trading only supports BUY to open)');
+    return;
+  }
+
   let amount = symbol === 'btcusd' ? 0.001 : symbol === 'ethusd' ? 0.01 : 0.1;
 
   addLog(`🎯 Decision: ${direction.toUpperCase()} ${symbol.toUpperCase()} @ $${price.toFixed(2)} (Conf: ${(bestPick.confidence * 100).toFixed(1)}%)`, 'success');
@@ -238,7 +254,29 @@ const handleStartGeminiTrading = async (model) => {
     });
 
     if (result.success) {
-      addLog(`✅ Order Placed: ${direction.toUpperCase()} ${amount} ${symbol.toUpperCase()} (ID: ${result.order?.order_id})`, 'success');
+      //addLog(`✅ Order Placed: ${direction.toUpperCase()} ${amount} ${symbol.toUpperCase()} (ID: ${result.order?.order_id})`, 'success');
+      // ✅ Extract actual data from the Gemini response
+      const { 
+        side, 
+        executed, 
+        symbol: orderSymbol, 
+        avg_execution_price, 
+        price: limitPrice,
+        order_id 
+      } = result.order;
+
+      const actualPrice = parseFloat(avg_execution_price) || parseFloat(limitPrice);
+      const actualAmount = parseFloat(executed);
+
+      if (actualAmount > 0) {
+        // This log shows the REAL trade data from Gemini
+        addLog(
+          'success', 
+          `💎 GEMINI TRADE: ${side.toUpperCase()} ${actualAmount} ${orderSymbol.toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id})`
+        );
+      } else {
+        addLog('info', `⏳ Order placed but not yet filled: ${side.toUpperCase()} ${orderSymbol.toUpperCase()} @ $${limitPrice}`);
+      }
       await fetchOpenPositions();
     } else {
       addLog(`❌ Order Failed: ${result.error}`, 'error');
@@ -616,6 +654,25 @@ const handleStopAllGeminiTrading = async () => {
   };
 }, []);*/
 
+// ✅ Update refs whenever the user changes the input
+useEffect(() => {
+  const value = parseFloat(stopLoss);
+  if (!isNaN(value) && value > 0) {
+    stopLossRef.current = value;
+    localStorage.setItem('stopLoss', stopLoss);
+    addLog('info', `⚙️ Stop Loss updated to ${value}%`);
+  }
+}, [stopLoss]);
+
+useEffect(() => {
+  const value = parseFloat(profitTarget);
+  if (!isNaN(value) && value > 0) {
+    profitTargetRef.current = value;
+    localStorage.setItem('profitTarget', profitTarget);
+    addLog('info', `⚙️ Profit Target updated to ${value}%`);
+  }
+}, [profitTarget]);
+
 useEffect(() => {
   const handleGeminiTrades = (payload) => {
     if (!payload) return;
@@ -896,14 +953,14 @@ useEffect(() => {
     const currentLast = localStorage.getItem('lastSetStartingValue');
 
     if (currentStart === '10000') {
-      localStorage.setItem('startingValue', '1000');
-      setStartingValue('1000');
-      console.log('✅ Migrated startingValue from 10000 to 1000');
+      localStorage.setItem('startingValue', '100');
+      setStartingValue('100');
+      console.log('✅ Migrated startingValue from 10000 to 100');
     }
     if (currentLast === '10000') {
-      localStorage.setItem('lastSetStartingValue', '1000');
-      setLastSetStartingValue('1000');
-      console.log('✅ Migrated lastSetStartingValue from 10000 to 1000');
+      localStorage.setItem('lastSetStartingValue', '100');
+      setLastSetStartingValue('100');
+      console.log('✅ Migrated lastSetStartingValue from 10000 to 100');
     }
   }, []);
 
@@ -1233,6 +1290,55 @@ useEffect(() => {
   }
 }; */
 
+// 3. Helper function to calculate P&L %
+const calculateCurrentPnlPercent = () => {
+  if (!openPositions || openPositions.length === 0) return 0;
+
+  let totalEntryValue = 0;
+  let totalCurrentValue = 0;
+
+  openPositions.forEach(pos => {
+    const currentPrice = getCurrentPrice(pos.symbol);
+    const entryValue = pos.entryPrice * pos.amount;
+    const currentValue = currentPrice * pos.amount;
+
+    totalEntryValue += entryValue;
+    totalCurrentValue += currentValue;
+  });
+
+  if (totalEntryValue === 0) return 0;
+
+  return ((totalCurrentValue - totalEntryValue) / totalEntryValue) * 100;
+};
+
+// 4. Risk management check
+const checkRiskManagement = () => {
+  if (!openPositions || openPositions.length === 0) return;
+
+  const currentPnlPct = calculateCurrentPnlPercent();
+  const liveStopLoss = stopLossRef.current;
+  const liveProfitTarget = profitTargetRef.current;
+
+  if (currentPnlPct <= -liveStopLoss) {
+    addLog('error', `🛑 Stop Loss hit at ${currentPnlPct.toFixed(2)}% (Limit: -${liveStopLoss}%)`);
+    handleCloseAllGeminiTrading();
+  } else if (currentPnlPct >= liveProfitTarget) {
+    addLog('success', `🎯 Profit Target hit at ${currentPnlPct.toFixed(2)}% (Target: +${liveProfitTarget}%)`);
+    handleCloseAllGeminiTrading();
+  }
+};
+
+// 5. Call it in your trading loop
+useEffect(() => {
+  if (!isTrading) return;
+
+  const interval = setInterval(() => {
+    checkRiskManagement(); // ✅ Check every tick
+  }, 5000);
+
+  return () => clearInterval(interval);
+}, [isTrading, openPositions]);
+
 const handleStartTrading = async () => {
   if (selectedModels.length === 0) {
     alert('Please select at least one model to trade');
@@ -1402,37 +1508,71 @@ const handleStartTrading = async () => {
   }; */
 
   // ✅ Close all active Gemini trades (reused by Stop Trading button)
-  const handleCloseAllGeminiTrading = async () => {
+const handleCloseAllGeminiTrading = async () => {
   addLog('info', '⏹ Closing active Gemini trade...');
 
   try {
-    // ✅ Use port 3001 (where your server.js is actually running)
     const res = await axios.post('/api/gemini/close-all', {
-        apiKey: geminiApiKey,
-        apiSecret: geminiApiSecret,
-        env: 'live'
+      apiKey: geminiApiKey,
+      apiSecret: geminiApiSecret,
+      env: 'live'
     });
 
-    if (res.data?.success) {
-      const pnl = Number(res.data.pnl || 0).toFixed(2);
-      const pnlSign = pnl >= 0 ? '+' : '';
+    // ✅ Check if backend explicitly said no positions found
+    if (res.data?.message === "No open positions found") {
+      addLog('info', 'ℹ️ No active trades to close.');
+      return;
+    }
 
+    if (res.data?.success) {
+      const results = res.data.results || [];
+      
+      if (results.length === 0) {
+        addLog('info', 'ℹ️ No active positions were found to close.');
+        return;
+      }
+
+      // Calculate total P&L across all closed positions
+      const totalPnl = results.reduce((sum, r) => sum + (Number(r.pnl) || 0), 0);
+      const pnlSign = totalPnl >= 0 ? '+' : '';
+
+      // Log the summary
       addLog(
         'success',
-        `✅ Trade closed | ${res.data.symbol} | P&L: ${pnlSign}${pnl} USDT`
+        `✅ Closed ${results.length} position(s) | Total P&L: ${pnlSign}${totalPnl.toFixed(2)} USDT`
       );
 
-      fetchGeminiBalances();
+      // Log each specific trade detail
+      results.forEach(r => {
+        const individualPnl = (Number(r.pnl) || 0).toFixed(2);
+        const individualSign = individualPnl >= 0 ? '+' : '';
+        addLog(
+          'info', 
+          `💎 GEMINI CLOSE: ${r.symbol.toUpperCase()}: ${r.side} closed at ${r.exitPrice} | P&L: ${individualSign}${individualPnl} USDT`
+        );
+      });
+
+      // Refresh balances
+      if (typeof fetchGeminiBalances === 'function') {
+        fetchGeminiBalances(geminiApiKey, geminiApiSecret, 'live');
+      }
+
+      // Refresh positions list
+      if (typeof fetchOpenPositions === 'function') {
+        await fetchOpenPositions();
+      }
     } else {
-      addLog(
-        'error',
-        `❌ Close failed: ${res.data?.error || 'Unknown error'}`
-      );
+      addLog('error', `❌ Close failed: ${res.data?.error || 'Unknown error'}`);
     }
   } catch (err) {
-    // ✅ This will now show the REAL error instead of "axios is not defined"
     const errorMsg = err.response?.data?.error || err.message || 'Unknown error';
-    addLog('error', `❌ Close error: ${errorMsg}`);
+    
+    // ✅ Gracefully handle "No open positions found" error
+    if (errorMsg.includes("No open positions found")) {
+      addLog('info', 'ℹ️ No active trades found to close.');
+    } else {
+      addLog('error', `❌ Close error: ${errorMsg}`);
+    }
   }
 };
 
@@ -2591,7 +2731,7 @@ const handleStartTrading = async () => {
               value={startingValue}
               onChange={handleStartingValueChange}
               disabled={isTrading}
-              placeholder="e.g., 1000"
+              placeholder="e.g., 100"
               style={{
                 width: '100%',
                 padding: '10px',
@@ -2610,21 +2750,36 @@ const handleStartTrading = async () => {
             <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
               Stop Loss ($):
             </label>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={stopLoss}
-              onChange={handleStopLossChange}
-              disabled={isTrading}
-              placeholder="e.g., 950"
-              style={{
-                width: '100%',
-                padding: '10px',
-                fontSize: '16px',
-                borderRadius: '4px',
-                border: '1px solid #ccc'
-              }}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={stopLoss}
+                onChange={handleStopLossChange}
+                disabled={false} // ✅ Changed from {isTrading} to {false}
+                placeholder="e.g., 950"
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  fontSize: '16px',
+                  borderRadius: '4px',
+                  border: '1px solid #ccc'
+                }}
+              />
+              {isTrading && (
+                <span style={{
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  backgroundColor: '#10b981',
+                  color: 'white',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap'
+                }}>
+                  LIVE
+                </span>
+              )}
+            </div>
             <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
               Suggested: ${(startValue * 0.98).toFixed(0)} (2% below starting value)
             </div>
@@ -2634,21 +2789,36 @@ const handleStartTrading = async () => {
             <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
               Profit Target ($):
             </label>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={profitTarget}
-              onChange={handleProfitTargetChange}
-              disabled={isTrading}
-              placeholder="e.g., 1050"
-              style={{
-                width: '100%',
-                padding: '10px',
-                fontSize: '16px',
-                borderRadius: '4px',
-                border: '1px solid #ccc'
-              }}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={profitTarget}
+                onChange={handleProfitTargetChange}
+                disabled={false} // ✅ Changed from {isTrading} to {false}
+                placeholder="e.g., 1050"
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  fontSize: '16px',
+                  borderRadius: '4px',
+                  border: '1px solid #ccc'
+                }}
+              />
+              {isTrading && (
+                <span style={{
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  backgroundColor: '#10b981',
+                  color: 'white',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap'
+                }}>
+                  LIVE
+                </span>
+              )}
+            </div>
             <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
               Suggested: ${(startValue * 1.03).toFixed(0)} (3% above starting value)
             </div>

@@ -318,3 +318,26 @@ export function useGemini() {
     setError,
   };
 }
+
+// ✅ Standalone helper for components that don't use the hook
+export const fetchGeminiBalances = async (apiKey, apiSecret, env = 'live') => {
+  try {
+    const response = await axios.post('/api/gemini/balances', {
+      apiKey,
+      apiSecret,
+      env,
+    });
+
+    if (response.data.success) {
+      return { success: true, data: response.data.balance };
+    } else {
+      throw new Error(response.data.error || 'Failed to fetch balances');
+    }
+  } catch (err) {
+    console.error('❌ Error fetching Gemini balances:', err);
+    return {
+      success: false,
+      error: err.response?.data?.error || err.message || 'Failed to fetch balances',
+    };
+  }
+};
