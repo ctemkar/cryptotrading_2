@@ -17,13 +17,14 @@ export function useGemini() {
   const DEFAULT_SYMBOLS = ['btcusd', 'ethusd', 'solusd'];
 
   // ✅ Function to fetch balances
-  const fetchBalances = async (key, secret) => {
+  const fetchBalances = async (userId) => {
     try {
       const response = await axios.post(
         '/api/gemini/balances',
         {
-          apiKey: key || apiKey,
-          apiSecret: secret || apiSecret,
+          //apiKey: key || apiKey,
+          //apiSecret: secret || apiSecret,
+          userId: userId,  // ✅ Changed from apiKey/apiSecret
           env: 'live',
         },
         {

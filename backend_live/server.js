@@ -1,4 +1,5 @@
 // backend/server.js
+require('dotenv').config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -32,6 +33,11 @@ const GEMINI_TICK_SIZE = {
   solusd: 0.000001,
 };
 
+/* ----------------------------------------
+   SOCKET TRACKING FOR BROADCAST EXCLUSION
+-----------------------------------------*/
+const socketsById = new Map(); // Track all connected sockets
+
 /**
  * Validate if order amount meets Gemini's minimum requirements
  */
@@ -59,6 +65,149 @@ function validateOrderAmount(symbol, amount) {
   
   return { valid: true };
 }
+
+// ========================================
+// APP STATE ENDPOINTS
+// ========================================
+
+app.get('/api/app-state', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const [rows] = await db.query('SELECT state_json, version FROM user_app_state WHERE user_id = ?', [userId]);
+    
+    if (!rows.length) {
+      // Return default state
+      const defaultState = {
+        selectedModels: [],
+        startingValue: "100",
+        stopLoss: "",
+        profitTarget: "",
+        isTrading: false,
+        tradingStopped: false,
+        stopReason: "",
+        finalProfitLoss: null,
+        initialValues: {},
+        updateSpeed: "1500",
+        isMockTrading: true
+      };
+      return res.json({ success: true, state: defaultState, version: 0 });
+    }
+
+    return res.json({ success: true, state: rows[0].state_json, version: rows[0].version });
+  } catch (err) {
+    console.error('❌ Error fetching app state:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch app state' });
+  }
+});
+
+app.put('/api/app-state', async (req, res) => {
+  try {
+    const { userId, state, socketId } = req.body; // ✅ Accept socketId from frontend
+    
+    if (!userId || !state) {
+      return res.status(400).json({ success: false, error: 'Missing userId or state' });
+    }
+
+    await db.query(
+      'INSERT INTO user_app_state (user_id, state_json, version) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE state_json = ?, version = version + 1',
+      [userId, JSON.stringify(state), JSON.stringify(state)]
+    );
+
+    // ✅ Broadcast to all devices EXCEPT the sender
+    if (socketId && socketsById.has(socketId)) {
+      // Exclude the sender by broadcasting to all OTHER sockets in the room
+      const senderSocket = socketsById.get(socketId);
+      senderSocket.to(userId).emit('app_state_sync', state);
+      console.log(`📤 State synced to other devices (excluded sender: ${socketId})`);
+    } else {
+      // Fallback: broadcast to all (if socketId not provided or invalid)
+      io.to(userId).emit('app_state_sync', state);
+      console.log(`📤 State synced to all devices (no sender exclusion)`);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error saving app state:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save app state' });
+  }
+});
+
+// ========================================
+// GEMINI CREDENTIALS ENDPOINTS
+// ========================================
+
+app.post('/api/gemini/credentials', async (req, res) => {
+  try {
+    const { userId, apiKey, apiSecret, env } = req.body;
+    
+    if (!userId || !apiKey || !apiSecret) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    const { enc, iv, authTag } = encrypt(apiSecret);
+
+    /*await db.query(
+      `INSERT INTO user_gemini_credentials (user_id, api_key, api_secret_enc, iv, auth_tag, env) 
+       VALUES (?, ?, ?, ?, ?, ?) 
+       ON DUPLICATE KEY UPDATE api_key=?, api_secret_enc=?, iv=?, auth_tag=?, env=?`,
+      [userId, apiKey, enc, iv, authTag, env || 'live', apiKey, enc, iv, authTag, env || 'live']
+    ); */
+
+    await db.query(
+      `INSERT INTO user_gemini_credentials (user_id, api_key, api_secret_enc, iv, auth_tag, env) 
+       VALUES (?, ?, ?, ?, ?, ?) 
+       ON DUPLICATE KEY UPDATE 
+         api_key = VALUES(api_key), 
+         api_secret_enc = VALUES(api_secret_enc), 
+         iv = VALUES(iv), 
+         auth_tag = VALUES(auth_tag), 
+         env = VALUES(env)`,
+      [userId, apiKey, enc, iv, authTag, env || 'live']
+    );
+
+    console.log(`✅ Securely stored Gemini keys for: ${userId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('❌ DB Error saving credentials:', err);
+    return res.status(500).json({ success: false, error: 'Database error Failed to save credentials' });
+  }
+});
+
+// Check if user has credentials
+app.get('/api/gemini/credentials/status', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const [rows] = await db.query('SELECT env FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    
+    return res.json({
+      success: true,
+      hasCredentials: rows.length > 0,
+      env: rows[0]?.env || 'live'
+    });
+  } catch (err) {
+    console.error('❌ Error checking credentials status:', err);
+    return res.status(500).json({ success: false, error: 'Failed to check credentials' });
+  }
+});
+
+app.delete('/api/gemini/credentials', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    await db.query('DELETE FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    
+    console.log(`🗑️ Deleted Gemini credentials for user ${userId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error deleting credentials:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete credentials' });
+  }
+});
 
 /* ------------------------------
    MYSQL DATABASE CONNECTION
@@ -185,6 +334,32 @@ const geminiMarketTradesCache = {
   const response = await axios.post(url, {}, { headers, timeout: 10000 });
   return response.data;
 } */
+
+// ========================================
+// ENCRYPTION SETUP
+// ========================================
+const ENCRYPTION_KEY = Buffer.from(process.env.ENCRYPTION_KEY || '', 'base64');
+
+if (ENCRYPTION_KEY.length !== 32) {
+  console.error('❌ ENCRYPTION_KEY must be 32 bytes (base64 encoded)');
+  process.exit(1);
+}
+
+function encrypt(text) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+  let enc = cipher.update(text, 'utf8', 'hex');
+  enc += cipher.final('hex');
+  return { enc, iv: iv.toString('hex'), authTag: cipher.getAuthTag().toString('hex') };
+}
+
+function decrypt(enc, iv, authTag) {
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(authTag, 'hex'));
+  let str = decipher.update(enc, 'hex', 'utf8');
+  str += decipher.final('utf8');
+  return str;
+}
 
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   // ✅ Choose base URL based on payload.env (default = live)
@@ -872,6 +1047,8 @@ function startGeminiTradesPolling() {
   console.log("✅ Gemini market trades auto-polling started for BTC, ETH, SOL (every 5s)");
 }
 
+ 
+
 /* ----------------------------------------
    API ENDPOINT: GET LAST 20 TRADES
 -----------------------------------------*/
@@ -1010,60 +1187,80 @@ app.get("/api/trades", async (req, res) => {
 app.post("/api/gemini/balances", async (req, res) => {
   try {
     console.log("📥 Received request body:", req.body);
-    //const { apiKey, apiSecret } = req.body;
-    const { apiKey, apiSecret, env = 'live' } = req.body; // ✅ env from frontend
+    
+    const { userId, env = 'live' } = req.body;
 
-    // Validate input
-    if (!apiKey || !apiSecret) {
+    // ✅ NEW: Validate userId instead of apiKey/apiSecret
+    if (!userId) {
       return res.status(400).json({ 
         success: false, 
-        error: "API Key and API Secret are required" 
+        error: "User ID is required" 
       });
     }
 
-    //console.log("🔗 Connecting to Gemini API for balances...");
-    console.log("🔗 Connecting to Gemini API for balances...", { env });
+    console.log("🔗 Fetching Gemini credentials for user:", userId);
+
+    // ✅ NEW: Fetch encrypted credentials from database
+    const [rows] = await db.query(
+      'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'No Gemini credentials found. Please connect your Gemini account first.' 
+      });
+    }
+
+    const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
+    const storedEnv = rows[0].env || 'live';
+
+    // ✅ NEW: Decrypt the secret
+    let apiSecret;
+    try {
+      apiSecret = decrypt(api_secret_enc, iv, auth_tag);
+    } catch (decryptError) {
+      console.error('❌ Failed to decrypt API secret:', decryptError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to decrypt credentials. Please reconnect your Gemini account.'
+      });
+    }
+
+    console.log("🔗 Connecting to Gemini API for balances...", { env: env || storedEnv });
     
-    // Call Gemini API
-    //const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
-    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances", { env });
+    // ✅ Use decrypted credentials
+    const balances = await geminiRequest(api_key, apiSecret, "/v1/balances", { env: env || storedEnv });
 
     console.log("✅ Gemini API response received");
     console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2));
 
     // ✅ Get REAL prices from Gemini
-    /*const [btcPrice, ethPrice, solPrice] = await Promise.all([
-      getGeminiPrice("btcusd"),
-      getGeminiPrice("ethusd"),
-      getGeminiPrice("solusd")
-    ]); */
-
     const [
         btcPrice, ethPrice, solPrice,
         xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
         shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
         hntPrice, dotPrice, ftmPrice, skyPrice
       ] = await Promise.all([
-        getGeminiPrice("btcusd", env),
-        getGeminiPrice("ethusd", env),
-        getGeminiPrice("solusd", env),
-        getGeminiPrice("xrpusd", env),
-        getGeminiPrice("avaxusd", env),
-        getGeminiPrice("linkusd", env),
-        getGeminiPrice("daiusd", env),
-        getGeminiPrice("ampusd", env),
-        getGeminiPrice("shibusd", env),
-        getGeminiPrice("atomusd", env),
-        getGeminiPrice("dogeusd", env),
-        getGeminiPrice("polusd", env),
-        getGeminiPrice("rndrusd", env),
-        getGeminiPrice("hntusd", env),
-        getGeminiPrice("dotusd", env),
-        getGeminiPrice("ftmusd", env),
-        getGeminiPrice("skyusd", env)
+        getGeminiPrice("btcusd", env || storedEnv),
+        getGeminiPrice("ethusd", env || storedEnv),
+        getGeminiPrice("solusd", env || storedEnv),
+        getGeminiPrice("xrpusd", env || storedEnv),
+        getGeminiPrice("avaxusd", env || storedEnv),
+        getGeminiPrice("linkusd", env || storedEnv),
+        getGeminiPrice("daiusd", env || storedEnv),
+        getGeminiPrice("ampusd", env || storedEnv),
+        getGeminiPrice("shibusd", env || storedEnv),
+        getGeminiPrice("atomusd", env || storedEnv),
+        getGeminiPrice("dogeusd", env || storedEnv),
+        getGeminiPrice("polusd", env || storedEnv),
+        getGeminiPrice("rndrusd", env || storedEnv),
+        getGeminiPrice("hntusd", env || storedEnv),
+        getGeminiPrice("dotusd", env || storedEnv),
+        getGeminiPrice("ftmusd", env || storedEnv),
+        getGeminiPrice("skyusd", env || storedEnv)
       ]);
-
-    //console.log("💵 Real Gemini prices:", { btcPrice, ethPrice, solPrice });
 
     console.log("💵 Real Gemini prices:", {
       btcPrice, ethPrice, solPrice,
@@ -1087,34 +1284,6 @@ app.post("/api/gemini/balances", async (req, res) => {
       const amount = parseFloat(balance.available) || 0;
 
       if (amount <= 0) return;
-
-      /*if (amount > 0) {
-        switch(currency) {
-          case "btc":
-            balanceData.btc = amount;
-            if (btcPrice) totalUsd += amount * btcPrice;
-            break;
-          case "eth":
-            balanceData.eth = amount;
-            if (ethPrice) totalUsd += amount * ethPrice;
-            break;
-          case "sol":
-            balanceData.sol = amount;
-            if (solPrice) totalUsd += amount * solPrice;
-            break;
-          case "usdc":
-          case "usd":
-          case "gusd":
-            balanceData.usdc += amount;
-            totalUsd += amount;
-            break;
-          default:
-            balanceData.other.push({
-              currency: balance.currency,
-              amount: amount
-            });
-        }
-      }*/
 
       switch (currency) {
           case "btc":
@@ -1153,7 +1322,7 @@ app.post("/api/gemini/balances", async (req, res) => {
           case "doge":
             if (dogePrice) totalUsd += amount * dogePrice;
             break;
-          case "pol": // Polygon in your screenshot
+          case "pol":
             if (polPrice) totalUsd += amount * polPrice;
             break;
           case "rndr":
@@ -1175,11 +1344,10 @@ app.post("/api/gemini/balances", async (req, res) => {
           case "usd":
           case "gusd":
             balanceData.usdc += amount;
-            totalUsd += amount;      // cash added 1:1
+            totalUsd += amount;
             break;
 
           default:
-            // Keep for display, but also try to value later if you wish
             balanceData.other.push({
               currency: balance.currency,
               amount: amount
@@ -1201,7 +1369,6 @@ app.post("/api/gemini/balances", async (req, res) => {
     console.error("❌ Gemini connection error:", error.message);
     console.error("❌ Full error:", error.response?.data);
     
-    // Handle specific error cases
     if (error.response) {
       const status = error.response.status;
       const data = error.response.data;
@@ -1826,8 +1993,22 @@ app.post("/api/gemini/order", async (req, res) => {
 /* ----------------------------------------
    SEND SNAPSHOT ON CONNECT
 -----------------------------------------*/
-io.on("connection", socket => {
+//io.on("connection", socket => {
+  io.on("connection", socket => {
   console.log("Client connected:", socket.id);
+
+  // ✅ NEW: Track this socket
+  socketsById.set(socket.id, socket);
+
+  // ✅ NEW: Join user-specific room
+  socket.on('join_user_room', (userId) => {
+    if (userId) {
+      socket.join(userId);
+      console.log(`✅ User ${userId} joined their private room (socket: ${socket.id})`);
+    }
+  });
+
+   console.log("Client connected:", socket.id);
 
   // Send models snapshot
   const modelsSnapshot = MODELS.map(m => ({
@@ -1869,6 +2050,8 @@ io.on("connection", socket => {
 
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
+    // ✅ NEW: Remove socket from tracking
+    socketsById.delete(socket.id);
   });
 });
 

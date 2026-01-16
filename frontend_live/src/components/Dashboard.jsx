@@ -170,6 +170,8 @@ const addLog = (a, b = 'info') => {
 const stopLossRef = useRef(parseFloat(stopLoss) || 2.0);
 const profitTargetRef = useRef(parseFloat(profitTarget) || 5.0);
 
+const isSyncingFromServer = useRef(false); // ✅ Add this line
+
   // ========================================
 // 🚀 GEMINI LIVE TRADING HANDLERS - ADD HERE
 // ========================================
@@ -233,13 +235,17 @@ const handleStartGeminiTrading = async (model) => {
 
   // ✅ BLOCK SELL (SHORT) IF NO POSITION EXISTS
   if (direction === 'sell' && !hasOpenPosition) {
-    addLog('info', '🚫 Skipping SHORT signal (Spot trading only supports BUY to open)');
+    addLog('🚫 Skipping SHORT signal (Spot trading only supports BUY to open)', 'info');
     return;
   }
 
   let amount = symbol === 'btcusd' ? 0.001 : symbol === 'ethusd' ? 0.01 : 0.1;
 
-  addLog(`🎯 Decision: ${direction.toUpperCase()} ${symbol.toUpperCase()} @ $${price.toFixed(2)} (Conf: ${(bestPick.confidence * 100).toFixed(1)}%)`, 'success');
+  // ✅ STEP 2 FIX: Log model decision BEFORE placing order
+  addLog(
+    `🤖 ${model.name} decided to ${direction.toUpperCase()} ${symbol.toUpperCase()} @ $${price.toFixed(2)}`,
+    direction === 'buy' ? 'success' : 'warning'
+  );
 
   try {
     const result = await placeGeminiOrder({
@@ -254,7 +260,6 @@ const handleStartGeminiTrading = async (model) => {
     });
 
     if (result.success) {
-      //addLog(`✅ Order Placed: ${direction.toUpperCase()} ${amount} ${symbol.toUpperCase()} (ID: ${result.order?.order_id})`, 'success');
       // ✅ Extract actual data from the Gemini response
       const { 
         side, 
@@ -271,11 +276,11 @@ const handleStartGeminiTrading = async (model) => {
       if (actualAmount > 0) {
         // This log shows the REAL trade data from Gemini
         addLog(
-          'success', 
-          `💎 GEMINI TRADE: ${side.toUpperCase()} ${actualAmount} ${orderSymbol.toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id})`
+          `💎 GEMINI TRADE: ${side.toUpperCase()} ${actualAmount} ${orderSymbol.toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id})`,
+          'success'
         );
       } else {
-        addLog('info', `⏳ Order placed but not yet filled: ${side.toUpperCase()} ${orderSymbol.toUpperCase()} @ $${limitPrice}`);
+        addLog(`⏳ Order placed but not yet filled: ${side.toUpperCase()} ${orderSymbol.toUpperCase()} @ $${limitPrice}`, 'info');
       }
       await fetchOpenPositions();
     } else {
@@ -732,11 +737,41 @@ useEffect(() => {
 useEffect(() => {
   const onOpened = (pos) => {
     console.log('🟢 Position opened:', pos);
+    
+    // ✅ Log the opening event
+    addLog(
+      `🚀 ${pos.modelName} opened ${pos.side} on ${pos.symbol.toUpperCase()} @ $${pos.entryPrice.toFixed(2)}`, 
+      'success'
+    );
+    
     fetchOpenPositions(); // refresh from backend
   };
 
   const onClosed = (payload) => {
     console.log('🔴 Position closed:', payload);
+    
+    // ✅ STEP 3 FIX: Extract data and log P&L
+    const {
+      model_name,
+      symbol,
+      pnl,
+      entryPrice,
+      exitPrice,
+      quantity
+    } = payload;
+
+    // Format the P&L text and color
+    const isProfit = pnl >= 0;
+    const pnlText = isProfit
+      ? `✅ PROFIT +$${pnl.toFixed(2)}`
+      : `❌ LOSS -$${Math.abs(pnl).toFixed(2)}`;
+
+    // Add the detailed log to the System Logs panel
+    addLog(
+      `📉 ${model_name} closed ${symbol.toUpperCase()} | Entry: $${entryPrice.toFixed(2)} → Exit: $${exitPrice.toFixed(2)} | Qty: ${quantity} | ${pnlText}`,
+      isProfit ? 'success' : 'error'
+    );
+
     fetchOpenPositions(); // refresh from backend
   };
 
@@ -747,7 +782,7 @@ useEffect(() => {
     socket.off('position_opened', onOpened);
     socket.off('position_closed', onClosed);
   };
-}, []);
+}, []); // Keep empty dependency array so it only mounts once
 
   // ✅ Initialize Google Sign-In
   useEffect(() => {
@@ -843,7 +878,7 @@ useEffect(() => {
   };
 
   // ✅ Persist Gemini connection
-  useEffect(() => {
+ /* useEffect(() => {
     if (geminiApiKey) localStorage.setItem('geminiApiKey', geminiApiKey);
     else localStorage.removeItem('geminiApiKey');
   }, [geminiApiKey]);
@@ -852,11 +887,13 @@ useEffect(() => {
     if (geminiApiSecret) localStorage.setItem('geminiApiSecret', geminiApiSecret);
     else localStorage.removeItem('geminiApiSecret');
   }, [geminiApiSecret]);
+  */
 
   // ✅ Persist mock trading state
-  useEffect(() => {
+  /*useEffect(() => {
     localStorage.setItem('isMockTrading', isMockTrading.toString());
   }, [isMockTrading]);
+  */
 
   // ✅ Stop mock trading when Gemini connects
   useEffect(() => {
@@ -890,57 +927,92 @@ useEffect(() => {
   };
 
   const handleGeminiAuthorize = async () => {
-    if (!geminiApiKey || !geminiApiSecret) {
-      setGeminiError('Please enter both API Key and API Secret');
-      return;
+  if (!geminiApiKey || !geminiApiSecret) {
+    setGeminiError('Please enter both API Key and API Secret');
+    return;
+  }
+
+  if (geminiApiKey.length < 10 || geminiApiSecret.length < 10) {
+    setGeminiError('API credentials appear invalid. Please check and try again.');
+    return;
+  }
+
+  try {
+    setIsGeminiConnecting(true);
+    setGeminiError(null);
+    setGeminiStep(3);
+
+    // ✅ Step 1: Save credentials to server (encrypted)
+    const saveRes = await fetch('/api/gemini/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userInfo.sub,
+        apiKey: geminiApiKey,
+        apiSecret: geminiApiSecret,
+        env: 'live'
+      })
+    });
+
+    const saveData = await saveRes.json();
+    if (!saveData.success) {
+      throw new Error(saveData.error || 'Failed to save credentials');
     }
 
-    if (geminiApiKey.length < 10 || geminiApiSecret.length < 10) {
-      setGeminiError('API credentials appear invalid. Please check and try again.');
-      return;
+    addLog('✅ Gemini credentials saved securely', 'success');
+
+    // ✅ Step 2: Test connection
+    const result = await connectGemini(geminiApiKey, geminiApiSecret);
+
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to connect to Gemini');
     }
 
+    addLog('✅ Connected to Gemini successfully', 'success');
+
+    // Close modal after success
+    setTimeout(() => {
+      setShowGeminiModal(false);
+      setGeminiStep(1);
+    }, 800);
+
+  } catch (error) {
+    console.error('Gemini authorization failed:', error);
+    setGeminiError(error.message || 'Authorization failed. Please try again.');
+    setGeminiStep(2);
+    addLog(`❌ Gemini connection failed: ${error.message}`, 'error');
+  } finally {
+    setIsGeminiConnecting(false);
+  }
+};
+
+  const handleGeminiDisconnect = async () => {
+  if (window.confirm('Are you sure you want to disconnect your Gemini account?')) {
     try {
-      setIsGeminiConnecting(true);
-      setGeminiError(null);
-      setGeminiStep(3);
+      // Delete credentials from server
+      await fetch('/api/gemini/credentials', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: userInfo.sub })
+      });
 
-      // Use the connectGemini function from useGemini hook
-      const result = await connectGemini(geminiApiKey, geminiApiSecret);
-
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to connect to Gemini');
-      }
-
-      // Close modal after success
-      setTimeout(() => {
-        setShowGeminiModal(false);
-        setGeminiStep(1);
-      }, 800);
-
-    } catch (error) {
-      console.error('Gemini authorization failed:', error);
-      setGeminiError(error.message || 'Authorization failed. Please try again.');
-      setGeminiStep(2);
-    } finally {
-      setIsGeminiConnecting(false);
-    }
-  };
-
-  const handleGeminiDisconnect = () => {
-    if (window.confirm('Are you sure you want to disconnect your Gemini account?')) {
       setGeminiApiKey('');
       setGeminiApiSecret('');
       disconnectGemini();
-
-      clearPositions();     // ✅ kill stale positions immediately
+      clearPositions();
       setGeminiTradingStatuses({});
 
       localStorage.removeItem('geminiApiKey');
       localStorage.removeItem('geminiApiSecret');
       setIsMockTrading(true);
+
+      addLog('✅ Gemini disconnected and credentials removed', 'success');
+    } catch (err) {
+      console.error('Failed to disconnect:', err);
+      addLog('⚠️ Disconnect failed', 'error');
     }
-  };
+  }
+};
 
   const handleOpenGeminiSite = () => {
     // Open Gemini in new tab
@@ -965,7 +1037,7 @@ useEffect(() => {
   }, []);
 
   // Save to localStorage whenever values change
-  useEffect(() => {
+ /* useEffect(() => {
     localStorage.setItem('stopLoss', stopLoss);
   }, [stopLoss]);
 
@@ -996,6 +1068,7 @@ useEffect(() => {
   useEffect(() => {
     localStorage.setItem('lastSetStartingValue', lastSetStartingValue);
   }, [lastSetStartingValue]);
+  */
 
   // Calculate normalized value for a model
   const getNormalizedValue = (modelId) => {
@@ -1090,6 +1163,136 @@ useEffect(() => {
       }
     });
   }, [modelsLatest, isTrading, stopLoss, profitTarget, selectedModels, initialValues, startValue]);
+
+  // ========================================
+// STATE HYDRATION FROM SERVER
+// ========================================
+useEffect(() => {
+  if (!userInfo?.sub) return;
+
+  // Join Socket.IO room
+  socket.emit('join_user_room', userInfo.sub);
+
+  // Fetch saved state from server
+  fetch(`/api/app-state?userId=${userInfo.sub}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.success && data.state) {
+        const savedState = data.state;
+        
+        // Hydrate all UI state
+        setSelectedModels(savedState.selectedModels || []);
+        setStartingValue(savedState.startingValue || "100");
+        setStopLoss(savedState.stopLoss || "");
+        setProfitTarget(savedState.profitTarget || "");
+        setIsTrading(savedState.isTrading || false);
+        setTradingStopped(savedState.tradingStopped || false);
+        setStopReason(savedState.stopReason || "");
+        setFinalProfitLoss(savedState.finalProfitLoss || null);
+        setInitialValues(savedState.initialValues || {});
+        setUpdateSpeed(savedState.updateSpeed || "1500");
+        setIsMockTrading(savedState.isMockTrading !== false);
+
+        addLog('✅ Settings synced from server', 'success');
+      }
+    })
+    .catch(err => {
+      console.error('❌ Failed to load app state:', err);
+      addLog('⚠️ Failed to sync settings', 'warning');
+    });
+
+  // Check if user has Gemini credentials
+  fetch(`/api/gemini/credentials/status?userId=${userInfo.sub}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.success && data.hasCredentials) {
+        addLog('💎 Gemini credentials found on server', 'info');
+        // Note: We don't auto-connect here - user must click "Connect" button
+      }
+    })
+    .catch(err => console.error('Failed to check Gemini credentials:', err));
+
+}, [userInfo?.sub]);
+
+// ========================================
+// STATE SYNCING TO SERVER (DEBOUNCED)
+// ========================================
+useEffect(() => {
+  if (!userInfo?.sub) return;
+
+  // ✅ If this state change was caused by a sync from another device, 
+  // reset the flag and STOP here. Do not send back to server.
+  if (isSyncingFromServer.current) {
+    isSyncingFromServer.current = false;
+    return;
+  }
+
+  const timeoutId = setTimeout(() => {
+    const stateToSave = {
+      selectedModels,
+      startingValue,
+      stopLoss,
+      profitTarget,
+      isTrading,
+      tradingStopped,
+      stopReason,
+      finalProfitLoss,
+      initialValues,
+      updateSpeed,
+      isMockTrading
+    };
+
+    console.log("📤 Sending state update to server...");
+
+    fetch('/api/app-state', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userInfo.sub, state: stateToSave })
+    }).catch(err => console.error('Failed to save state:', err));
+
+  }, 1000); // Debounce 1 second
+
+  return () => clearTimeout(timeoutId);
+}, [
+  userInfo?.sub,
+  selectedModels,
+  startingValue,
+  stopLoss,
+  profitTarget,
+  isTrading,
+  tradingStopped,
+  stopReason,
+  finalProfitLoss,
+  initialValues,
+  updateSpeed,
+  isMockTrading
+]);
+
+// ========================================
+// REAL-TIME SYNC FROM OTHER DEVICES
+// ========================================
+useEffect(() => {
+  socket.on('app_state_sync', (newState) => {
+    // ✅ Set the flag to true so the outgoing sync effect ignores this update
+    isSyncingFromServer.current = true;
+
+    setSelectedModels(newState.selectedModels || []);
+    setStartingValue(newState.startingValue || "100");
+    setStopLoss(newState.stopLoss || "");
+    setProfitTarget(newState.profitTarget || "");
+    setIsTrading(newState.isTrading || false);
+    setTradingStopped(newState.tradingStopped || false);
+    setStopReason(newState.stopReason || "");
+    setFinalProfitLoss(newState.finalProfitLoss || null);
+    setInitialValues(newState.initialValues || {});
+    setUpdateSpeed(newState.updateSpeed || "1500");
+    setIsMockTrading(newState.isMockTrading !== false);
+
+    //addLog('🔄 Settings synced from another device', 'info');
+  });
+
+  return () => socket.off('app_state_sync');
+}, []);
 
   const handleStartingValueChange = (e) => {
     const value = e.target.value;
@@ -1340,8 +1543,11 @@ useEffect(() => {
 }, [isTrading, openPositions]);
 
 const handleStartTrading = async () => {
-  if (selectedModels.length === 0) {
-    alert('Please select at least one model to trade');
+  // 1. Debug Log: See what the app thinks is selected
+  console.log("🚀 Start Button Clicked. Selected Models:", selectedModels);
+
+  if (!selectedModels || selectedModels.length === 0) {
+    addLog("⚠️ No models selected! Please select at least one model to trade.", "warning");
     return;
   }
 
