@@ -48,6 +48,15 @@ const [btcTrades, setBtcTrades] = useState([]);
 const [ethTrades, setEthTrades] = useState([]);
 const [solTrades, setSolTrades] = useState([]);
 
+// Combine all symbol trades and get last 20
+const last20GeminiTrades = [
+  ...btcTrades.map(t => ({ ...t, symbol: 'btcusd' })),
+  ...ethTrades.map(t => ({ ...t, symbol: 'ethusd' })),
+  ...solTrades.map(t => ({ ...t, symbol: 'solusd' })),
+]
+  .sort((a, b) => Number(b.timestampms || b.timestamp || 0) - Number(a.timestampms || a.timestamp || 0))
+  .slice(0, 20);
+
 const [geminiBalance, setGeminiBalance] = useState({
   btc: 0,
   eth: 0,
@@ -81,14 +90,28 @@ const addLog = (a, b = 'info') => {
 
   const timestamp = new Date().toLocaleTimeString();
 
+  // 1. Update local UI state (The "Live" view)
   setTradingLogs(prev => [
     { timestamp, type, message },
     ...prev
   ].slice(0, 50));
 
   console.log(`[${type.toUpperCase()}] ${message}`);
-};  // ✅ useGemini hook for enhanced Gemini integration
-  
+
+  // 2. Archive to Database in the background
+  if (userInfo?.sub) {
+    fetch('/api/logs/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        userId: userInfo.sub, 
+        message, 
+        type 
+      })
+    }).catch(err => console.error("Archive failed:", err));
+  }
+};
+
   const {
   balances: geminiBalances,
   marketTrades: geminiMarketTrades,
@@ -152,6 +175,7 @@ const addLog = (a, b = 'info') => {
     const saved = localStorage.getItem('selectedModels');
     return saved ? JSON.parse(saved) : [];
   });
+  const [appState, setAppState] = useState({}); // ✅ ADD THIS LINE
   const [initialValues, setInitialValues] = useState(() => {
     const saved = localStorage.getItem('initialValues');
     return saved ? JSON.parse(saved) : {};
@@ -160,17 +184,29 @@ const addLog = (a, b = 'info') => {
   const [updateSpeed, setUpdateSpeed] = useState(() => localStorage.getItem('updateSpeed') || '1500');
 
   const { modelsLatest, modelsHistory } = useModels();
-  const { latest: cryptoLatest, history: cryptoHistory } = useCryptoPrices();
+  // We map 'latest' to both 'cryptoLatest' and 'cryptoPrices' so your existing code doesn't break
+  const { latest: cryptoLatest, latest: cryptoPrices, history: cryptoHistory } = useCryptoPrices();
 
   const availableModels = Object.values(modelsLatest);
-  const startValue = parseFloat(startingValue) || 100;
+  // ✅ Replace your old 'const startValue = ...' with this:
+const startValue = (isTrading && appState?.tradingSession?.startValue != null)
+  ? Number(appState.tradingSession.startValue)
+  : (parseFloat(startingValue) || 100);
+
+const safeStartValue = Number.isFinite(startValue) && startValue > 0 ? startValue : 100;
+
+const [localModelOverrides, setLocalModelOverrides] = useState({});
+
   const currentPrice = cryptoLatest.BTCUSDT || null;
 
+  
   // ✅ Add refs to hold the "live" values
 const stopLossRef = useRef(parseFloat(stopLoss) || 2.0);
 const profitTargetRef = useRef(parseFloat(profitTarget) || 5.0);
 
 const isSyncingFromServer = useRef(false); // ✅ Add this line
+
+
 
   // ========================================
 // 🚀 GEMINI LIVE TRADING HANDLERS - ADD HERE
@@ -241,7 +277,7 @@ const handleStartGeminiTrading = async (model) => {
 
   let amount = symbol === 'btcusd' ? 0.001 : symbol === 'ethusd' ? 0.01 : 0.1;
 
-  // ✅ STEP 2 FIX: Log model decision BEFORE placing order
+  // ✅ Log model decision BEFORE placing order
   addLog(
     `🤖 ${model.name} decided to ${direction.toUpperCase()} ${symbol.toUpperCase()} @ $${price.toFixed(2)}`,
     direction === 'buy' ? 'success' : 'warning'
@@ -249,6 +285,7 @@ const handleStartGeminiTrading = async (model) => {
 
   try {
     const result = await placeGeminiOrder({
+      userId: userInfo?.sub,  // ✅ ADDED userId
       modelId: model.id,
       modelName: model.name,
       symbol: symbol.toLowerCase(),
@@ -259,33 +296,45 @@ const handleStartGeminiTrading = async (model) => {
       closePosition: false,
     });
 
-    if (result.success) {
-      // ✅ Extract actual data from the Gemini response
-      const { 
-        side, 
-        executed, 
-        symbol: orderSymbol, 
-        avg_execution_price, 
-        price: limitPrice,
-        order_id 
-      } = result.order;
+    // ✅ ENHANCED ERROR LOGGING
+    if (!result.success) {
+      addLog(
+        `❌ Order Failed (${model.name}) | ${symbol.toUpperCase()} | ${direction.toUpperCase()} | ` +
+        `reason=${result.reason || 'n/a'} geminiReason=${result.geminiReason || 'n/a'} msg=${result.geminiMessage || result.error}`,
+        'error'
+      );
 
-      const actualPrice = parseFloat(avg_execution_price) || parseFloat(limitPrice);
-      const actualAmount = parseFloat(executed);
-
-      if (actualAmount > 0) {
-        // This log shows the REAL trade data from Gemini
-        addLog(
-          `💎 GEMINI TRADE: ${side.toUpperCase()} ${actualAmount} ${orderSymbol.toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id})`,
-          'success'
-        );
-      } else {
-        addLog(`⏳ Order placed but not yet filled: ${side.toUpperCase()} ${orderSymbol.toUpperCase()} @ $${limitPrice}`, 'info');
+      if (result.details) {
+        addLog(`🧾 Details: ${JSON.stringify(result.details)}`, 'error');
       }
-      await fetchOpenPositions();
-    } else {
-      addLog(`❌ Order Failed: ${result.error}`, 'error');
+      return;
     }
+
+    // ✅ Extract actual data from the Gemini response
+    const { 
+      side, 
+      executed, 
+      symbol: orderSymbol, 
+      avg_execution_price, 
+      price: limitPrice,
+      order_id 
+    } = result.order;
+
+    const actualPrice = parseFloat(avg_execution_price) || parseFloat(limitPrice);
+    const actualAmount = parseFloat(executed);
+
+    if (actualAmount > 0) {
+      // This log shows the REAL trade data from Gemini
+      addLog(
+        `💎 GEMINI TRADE: ${side.toUpperCase()} ${actualAmount} ${orderSymbol.toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id})`,
+        'success'
+      );
+    } else {
+      addLog(`⏳ Order placed but not yet filled: ${side.toUpperCase()} ${orderSymbol.toUpperCase()} @ $${limitPrice}`, 'info');
+    }
+    
+    await fetchOpenPositions();
+    
   } catch (err) {
     addLog(`❌ Execution Error: ${err.message}`, 'error');
   }
@@ -315,7 +364,11 @@ const handleStopGeminiTrading = async (model) => {
   addLog(`🛑 Stopping ${model.name}: Closing ${symbol.toUpperCase()}...`, 'info');
 
   try {
+    // ✅ ADD THIS DEBUG LOG HERE (right before placeGeminiOrder)
+    console.log('🔍 Closing position with userId:', userInfo?.sub || user?.sub);
+
     const result = await placeGeminiOrder({
+      userId: userInfo?.sub || user?.sub,  // ✅ Fallback to user.sub if userInfo is undefined
       symbol,
       side: closingSide,
       amount: position.amount,
@@ -326,20 +379,50 @@ const handleStopGeminiTrading = async (model) => {
       closePosition: true,
     });
 
-    if (result.success) {
-      const pnl = result.positionClose?.pnl || 0;
-      addLog(`💰 Position Closed. P&L: $${pnl.toFixed(2)}`, pnl >= 0 ? 'success' : 'error');
-      
-      await fetchOpenPositions();
-      await refreshGeminiBalances();
+    // ✅ ENHANCED ERROR LOGGING
+    if (!result.success) {
+      addLog(
+        `❌ Close Position Failed (${model.name}) | ${symbol.toUpperCase()} | ${closingSide.toUpperCase()} | ` +
+        `reason=${result.reason || 'n/a'} geminiReason=${result.geminiReason || 'n/a'} msg=${result.geminiMessage || result.error}`,
+        'error'
+      );
 
-      // ✅ AUTO-RESTART LOOP
-      addLog(`🔄 Strategy continuing... searching for next opportunity.`, 'info');
-      setTimeout(() => handleStartGeminiTrading(model), 3000); 
-
-    } else {
-      addLog(`❌ Failed to close position: ${result.error}`, 'error');
+      if (result.details) {
+        addLog(`🧾 Details: ${JSON.stringify(result.details)}`, 'error');
+      }
+      return;
     }
+
+    // ✅ SUCCESS: Extract P&L and order details
+    const pnl = result.positionClose?.pnl || 0;
+    const { 
+      side, 
+      executed, 
+      symbol: orderSymbol, 
+      avg_execution_price, 
+      price: limitPrice,
+      order_id 
+    } = result.order || {};
+
+    const actualPrice = parseFloat(avg_execution_price) || parseFloat(limitPrice) || currentPrice;
+    const actualAmount = parseFloat(executed) || position.amount;
+
+    // Log the actual closing trade
+    addLog(
+      `💎 POSITION CLOSED: ${side?.toUpperCase() || closingSide.toUpperCase()} ${actualAmount} ${(orderSymbol || symbol).toUpperCase()} @ $${actualPrice.toFixed(2)} (ID: ${order_id || 'N/A'})`,
+      'success'
+    );
+
+    // Log P&L
+    addLog(`💰 P&L: $${pnl.toFixed(2)}`, pnl >= 0 ? 'success' : 'error');
+    
+    await fetchOpenPositions();
+    await refreshGeminiBalances();
+
+    // ✅ AUTO-RESTART LOOP
+    addLog(`🔄 Strategy continuing... searching for next opportunity.`, 'info');
+    setTimeout(() => handleStartGeminiTrading(model), 3000); 
+
   } catch (error) {
     addLog(`❌ Error during stop: ${error.message}`, 'error');
   }
@@ -633,17 +716,24 @@ const handleStopAllGeminiTrading = async () => {
 
   // ✅ Listen for real-time trade updates
   useEffect(() => {
-    fetchTrades();
+  fetchTrades();
 
-    socket.on('new_trade', (trade) => {
-      console.log('📊 New trade received:', trade);
-      setTrades((prev) => [trade, ...prev].slice(0, 20));
-    });
+  socket.on('new_trade', (trade) => {
+    console.log('📊 New trade received:', trade);
+    setTrades((prev) => [trade, ...prev].slice(0, 20));
+  });
 
-    return () => {
-      socket.off('new_trade');
-    };
-  }, []);
+  // ✅ FIX: Clear logs listener with correct state setter
+  socket.on('clear_session_logs', () => {
+    console.log("🧹 Clearing session logs (triggered by another device)");
+    setTradingLogs([]); // ✅ CORRECT
+  });
+
+  return () => {
+    socket.off('new_trade');
+    socket.off('clear_session_logs');
+  };
+}, []);
 
   // ✅ NEW: Listen for real-time Gemini market trades
 /*useEffect(() => {
@@ -678,9 +768,11 @@ useEffect(() => {
   }
 }, [profitTarget]);
 
+// ✅ Live Gemini market trades (BTC / ETH / SOL)
 useEffect(() => {
   const handleGeminiTrades = (payload) => {
     if (!payload) return;
+
     const { symbol, trades } = payload;
     console.log('💎 Live Gemini trades update:', symbol, trades?.length);
 
@@ -702,6 +794,77 @@ useEffect(() => {
   socket.on('gemini_market_trades', handleGeminiTrades);
   return () => {
     socket.off('gemini_market_trades', handleGeminiTrades);
+  };
+}, [socket]);
+
+// ✅ FIXED: Handle models_reset payload correctly
+useEffect(() => {
+  if (!socket) return;
+
+  const handleModelsReset = (payload) => {
+    console.log('📊 Received model reset from server:', payload);
+
+    /**
+     * Backend payload shape:
+     * {
+     *   initialValues: { modelId: number, ... },  // ← RAW baselines
+     *   startingValue,                             // ← UI Start Value ($100, $500, etc.)
+     *   sessionId,
+     *   startTime,
+     *   entryPrices
+     * }
+     */
+
+    const initialVals =
+      payload?.initialValues && typeof payload.initialValues === 'object'
+        ? payload.initialValues
+        : {};
+
+    if (Object.keys(initialVals).length === 0) {
+      console.warn('⚠️ models_reset received without initialValues');
+      return;
+    }
+
+    // ✅ Patch 2: Extract the Start Value from payload
+    const sv = Number(payload?.startingValue) || 100;
+
+    // ✅ Create overrides that force ALL models to display the Start Value
+    // (NOT the raw initialValues which are baseline snapshots)
+    const overrides = {};
+    Object.keys(initialVals).forEach((modelId) => {
+      overrides[modelId] = sv;  // ← Use Start Value, not raw baseline
+    });
+
+    // ✅ Force UI to start at Starting Value immediately
+    setLocalModelOverrides(overrides);
+
+    // ✅ Store the raw baselines for percentage calculations
+    setInitialValues(initialVals);
+
+    // ✅ Optional: keep session info synced (safe no-op if unused)
+    setAppState((prev) => ({
+      ...prev,
+      tradingSession: payload?.sessionId
+        ? {
+            ...(prev.tradingSession || {}),
+            sessionId: payload.sessionId,
+            startTime: payload.startTime,
+            startValue: payload.startingValue,
+            entryPrices: payload.entryPrices || prev.tradingSession?.entryPrices || {},
+          }
+        : prev.tradingSession,
+    }));
+
+    // ✅ Let live data take over after short delay
+    setTimeout(() => {
+      setLocalModelOverrides({});
+    }, 2000);
+  };
+
+  socket.on('models_reset', handleModelsReset);
+
+  return () => {
+    socket.off('models_reset', handleModelsReset);
   };
 }, [socket]);
 
@@ -962,7 +1125,8 @@ useEffect(() => {
     addLog('✅ Gemini credentials saved securely', 'success');
 
     // ✅ Step 2: Test connection
-    const result = await connectGemini(geminiApiKey, geminiApiSecret);
+    //const result = await connectGemini(geminiApiKey, geminiApiSecret);
+    const result = await connectGemini(userInfo.sub);
 
     if (!result.success) {
       throw new Error(result.error || 'Failed to connect to Gemini');
@@ -1071,22 +1235,33 @@ useEffect(() => {
   */
 
   // Calculate normalized value for a model
-  const getNormalizedValue = (modelId) => {
-    const model = modelsLatest[modelId];
-    if (!model || typeof model.accountValue !== 'number') {
-      return startValue;
-    }
+  // Calculate normalized value for a model
+// 1. Update the normalization logic to use the session's start value
+const getNormalizedValue = (modelId) => {
+  if (localModelOverrides[modelId] !== undefined) {
+    return localModelOverrides[modelId];
+  }
 
-    if (!initialValues[modelId]) {
-      return Math.round(model.accountValue);
-    }
+  const model = modelsLatest[modelId];
+  if (!model || typeof model.accountValue !== 'number') {
+    return safeStartValue;
+  }
 
-    const actualInitial = initialValues[modelId];
-    const actualCurrent = model.accountValue;
-    const percentChange = (actualCurrent - actualInitial) / actualInitial;
+  // Use safeStartValue which is derived from appState.tradingSession.startValue
+  if (!initialValues[modelId]) {
+    return Math.round(model.accountValue);
+  }
 
-    return Math.round(startValue * (1 + percentChange));
-  };
+  const actualInitial = initialValues[modelId];
+  const actualCurrent = model.accountValue;
+  
+  if (actualInitial === 0) return safeStartValue;
+  
+  const percentChange = (actualCurrent - actualInitial) / actualInitial;
+
+  // ✅ All models now scale based on the value you entered
+  return Math.round(safeStartValue * (1 + percentChange));
+};
 
   // Debug logs
   useEffect(() => {
@@ -1179,10 +1354,13 @@ useEffect(() => {
     .then(data => {
       if (data.success && data.state) {
         const savedState = data.state;
-        
+
+        // ✅ Patch 1: hydrate appState so session startValue logic works
+        setAppState(savedState);
+
         // Hydrate all UI state
         setSelectedModels(savedState.selectedModels || []);
-        setStartingValue(savedState.startingValue || "100");
+        setStartingValue(String(savedState.startingValue ?? "100")); // ✅ normalize to string
         setStopLoss(savedState.stopLoss || "");
         setProfitTarget(savedState.profitTarget || "");
         setIsTrading(savedState.isTrading || false);
@@ -1276,8 +1454,11 @@ useEffect(() => {
     // ✅ Set the flag to true so the outgoing sync effect ignores this update
     isSyncingFromServer.current = true;
 
+    // ✅ Patch 3: Update appState so startValue calculation works correctly
+    setAppState(newState);
+
     setSelectedModels(newState.selectedModels || []);
-    setStartingValue(newState.startingValue || "100");
+    setStartingValue(String(newState.startingValue ?? "100")); // ✅ normalize to string
     setStopLoss(newState.stopLoss || "");
     setProfitTarget(newState.profitTarget || "");
     setIsTrading(newState.isTrading || false);
@@ -1323,38 +1504,58 @@ useEffect(() => {
   };
 
   const handleModelSelection = (modelId) => {
-    console.log('Card clicked for model:', modelId);
+  console.log('Card clicked for model:', modelId);
 
-    setSelectedModels(prevSelected => {
-      const isAlreadySelected = prevSelected.includes(modelId);
+  setSelectedModels(prevSelected => {
+    const isAlreadySelected = prevSelected.includes(modelId);
 
-      if (isAlreadySelected) {
-        // Deselect: remove from monitoring models
-        return prevSelected.filter(id => id !== modelId);
-      } else {
-        // Select: add to monitoring models
-        // If trading is active, reset the baseline so this model starts at startingValue now
-        if (isTrading) {
-          setInitialValues(prevInit => {
-            const model = modelsLatest[modelId];
-            if (!model || typeof model.accountValue !== 'number') {
-              return prevInit;
-            }
+    if (isAlreadySelected) {
+      // Deselect: remove from monitoring models
+      return prevSelected.filter(id => id !== modelId);
+    } else {
+      // Select: add to monitoring models
+      // If trading is active, reset the baseline so this model starts at startingValue now
+      if (isTrading) {
+        setInitialValues(prevInit => {
+          const model = modelsLatest[modelId];
+          if (!model || typeof model.accountValue !== 'number') {
+            console.warn(`Cannot set initial value for ${modelId}: model data unavailable`);
+            return prevInit;
+          }
 
-            return {
-              ...prevInit,
-              // Set the "initial" actual account value to the current one,
-              // so normalized value becomes exactly startingValue at this moment
-              [modelId]: model.accountValue
-            };
+          console.log(`✅ Setting initial value for ${modelId}: ${model.accountValue} (will normalize to ${safeStartValue})`);
+
+          return {
+            ...prevInit,
+            // Set the "initial" actual account value to the current one,
+            // so normalized value becomes exactly startingValue at this moment
+            [modelId]: model.accountValue
+          };
+        });
+
+        // ✅ FIX: Force UI to show startingValue immediately
+        setLocalModelOverrides(prev => ({
+          ...prev,
+          [modelId]: safeStartValue
+        }));
+
+        console.log(`🎯 Model ${modelId} added mid-session - will display at $${safeStartValue}`);
+
+        // ✅ Clear the override after 2 seconds so live data takes over
+        setTimeout(() => {
+          setLocalModelOverrides(prev => {
+            const updated = { ...prev };
+            delete updated[modelId];
+            return updated;
           });
-        }
-
-        return [...prevSelected, modelId];
+          console.log(`🔄 Cleared override for ${modelId} - now showing live normalized value`);
+        }, 2000);
       }
-    });
-  };
 
+      return [...prevSelected, modelId];
+    }
+  });
+};
   /*const handleStartTrading = () => {
     if (selectedModels.length === 0) {
       alert('Please select at least one model to trade');
@@ -1543,21 +1744,38 @@ useEffect(() => {
 }, [isTrading, openPositions]);
 
 const handleStartTrading = async () => {
-  // 1. Debug Log: See what the app thinks is selected
-  console.log("🚀 Start Button Clicked. Selected Models:", selectedModels);
+  // ✅ 1. Clear the UI logs for a fresh session
+  setTradingLogs([]);
 
+  // ✅ 2. Tell other devices to clear their UI logs too
+  if (userInfo?.sub) {
+    socket.emit('request_clear_logs', userInfo.sub);
+  }
+
+  // ✅ 3. Start the fresh session log
+  addLog("🚀 Starting fresh trading session. Previous logs archived to database.", "info");
+
+  console.log("🚀 Start Button Clicked. Selected Models:", selectedModels);
+  console.log("🔍 Models Latest Data:", modelsLatest);
+
+  // Validation: Check if models are selected
   if (!selectedModels || selectedModels.length === 0) {
     addLog("⚠️ No models selected! Please select at least one model to trade.", "warning");
+    alert('Please select at least one model to trade');
     return;
   }
 
+  // Validation: Check starting value
   const sv = parseFloat(startingValue);
   if (!sv || sv <= 0) {
+    addLog("⚠️ Invalid starting value. Must be greater than 0.", "error");
     alert('Please enter a valid starting value (must be greater than 0)');
     return;
   }
 
+  // Validation: Check if at least one risk parameter is set
   if (!stopLoss && !profitTarget) {
+    addLog("⚠️ Please set Stop Loss or Profit Target.", "warning");
     alert('Please enter at least one value (Stop Loss or Profit Target)');
     return;
   }
@@ -1565,39 +1783,172 @@ const handleStartTrading = async () => {
   const stopLossValue = parseFloat(stopLoss);
   const profitTargetValue = parseFloat(profitTarget);
 
+  // Validation: Stop Loss
   if (stopLoss && (isNaN(stopLossValue) || stopLossValue <= 0)) {
+    addLog("⚠️ Invalid Stop Loss value.", "error");
     alert('Please enter a valid Stop Loss value (must be greater than 0)');
     return;
   }
 
+  // Validation: Profit Target
   if (profitTarget && (isNaN(profitTargetValue) || profitTargetValue <= 0)) {
+    addLog("⚠️ Invalid Profit Target value.", "error");
     alert('Please enter a valid Profit Target value (must be greater than 0)');
     return;
   }
 
-  // Simulator init
-  const initVals = {};
-  Object.keys(modelsLatest).forEach((id) => {
-    const m = modelsLatest[id];
-    initVals[id] = m?.accountValue || sv;
-  });
-  setInitialValues(initVals);
+  // ✅ 4. Create a GLOBAL "Start Trading" snapshot
+  // This is what makes Overview + Monitored start at the same baseline everywhere.
+  const sessionStartTime = new Date().toISOString();
+  const sessionId = `${userInfo?.sub || 'anon'}_${Date.now()}`;
 
+  // Snapshot entry prices for *all* symbols we care about (MODELS + whatever is in cryptoPrices)
+  const symbolsToSnapshot = new Set();
+  (availableModels || []).forEach(m => {
+    if (m?.symbol) symbolsToSnapshot.add(m.symbol);
+  });
+  Object.keys(cryptoPrices || {}).forEach(sym => symbolsToSnapshot.add(sym));
+
+  const entryPrices = {};
+  symbolsToSnapshot.forEach(sym => {
+    const p = cryptoPrices?.[sym];
+    if (typeof p === 'number' && isFinite(p) && p > 0) {
+      entryPrices[sym] = p;
+    }
+  });
+
+  if (Object.keys(entryPrices).length === 0) {
+    // Not fatal, but it means UI won't be able to compute consistent P&L baselines yet
+    addLog("⚠️ Price snapshot was empty (cryptoPrices not ready). Baselines may be inconsistent until prices load.", "warning");
+  } else {
+    addLog(`📌 Captured global start price snapshot for ${Object.keys(entryPrices).length} symbols`, "info");
+  }
+
+  // ✅ 5. Initial values:
+  // IMPORTANT FIX:
+  // - `initialValues` must store the *RAW* model accountValue at session start (baseline for percent change).
+  // - The *DISPLAY* should start at `sv` for ALL models (done via local overrides).
+  const initialVals = {};
+  const uiStartOverrides = {};
+
+  (availableModels || []).forEach(m => {
+    if (!m?.id) return;
+
+    const rawNow = modelsLatest?.[m.id]?.accountValue;
+
+    // Baseline raw value for normalization math
+    if (typeof rawNow === 'number' && isFinite(rawNow) && rawNow > 0) {
+      initialVals[m.id] = rawNow;
+    } else {
+      // Fallback so we don't end up with undefined / 0
+      initialVals[m.id] = sv;
+    }
+
+    // Force UI to show the start value immediately
+    uiStartOverrides[m.id] = sv;
+  });
+
+  // Fallback: if availableModels somehow empty, at least set selected models
+  if (Object.keys(initialVals).length === 0) {
+    (selectedModels || []).forEach(modelId => {
+      const rawNow = modelsLatest?.[modelId]?.accountValue;
+      initialVals[modelId] = (typeof rawNow === 'number' && isFinite(rawNow) && rawNow > 0) ? rawNow : sv;
+      uiStartOverrides[modelId] = sv;
+    });
+  }
+
+  setInitialValues(initialVals);
+  setLocalModelOverrides(uiStartOverrides); // Set locally for instant UI feedback
+
+  // ✅ 5.5 CRITICAL: Force modelsLatest to start at the Starting Value
+  // This ensures the UI displays $10 (or whatever Starting Value is) immediately
+  //setModelsLatest(initialVals);
+
+  // ✅ 6. Set trading state locally
   setIsTrading(true);
   setTradingStopped(false);
   setStopReason('');
   setFinalProfitLoss(null);
 
-  // ✅ Auto-open ONE position per selected model (model decides symbol)
-  if (isGeminiConnected && selectedModels.length > 0) {
-    for (const modelId of selectedModels) {
-      const model = modelsLatest[modelId];
-      if (!model) continue;
+  addLog(`🚀 Starting trading session with ${selectedModels.length} model(s)...`, 'info');
+  console.log("📊 Initial Values Set (RAW BASELINES):", initialVals);
+  console.log("🧷 UI Start Overrides (DISPLAY = Start Value):", uiStartOverrides);
 
-      // ✅ Model auto-selects best symbol & direction
-      await handleStartGeminiTrading(model);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // 1s delay between models
+  // ✅ 7. Sync state to backend (multi-device consistency)
+  if (userInfo?.sub) {
+    const stateToSave = {
+      selectedModels,
+      startingValue: sv, // store as number (cleaner than string)
+      stopLoss,
+      profitTarget,
+      isTrading: true,
+      initialValues: initialVals, // 🔥 This triggers the backend reset
+      tradingStopped: false,
+      stopReason: '',
+      finalProfitLoss: null,
+
+      // 🔥 The important new part:
+      tradingSession: {
+        sessionId,
+        startTime: sessionStartTime,
+        startValue: sv,
+        entryPrices, // symbol -> price at the instant Start Trading was clicked
+      },
+
+      // Used by UI to ensure Overview + Monitored start at the same Start Value
+      initialValues: initialVals,
+
+      updateSpeed,
+      isMockTrading,
+    };
+
+    console.log("📤 Syncing trading state to server...");
+
+    try {
+      await fetch('/api/app-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userInfo.sub,
+          state: stateToSave,
+          socketId: socket.id, // ✅ Exclude this device from broadcast
+        }),
+      });
+      console.log("✅ State synced successfully");
+    } catch (err) {
+      console.error('❌ Failed to save state:', err);
+      addLog('⚠️ Failed to sync state to server', 'warning');
     }
+  }
+
+  // ✅ 8. Trigger Gemini Trading if connected (only for selected models)
+  if (isGeminiConnected) {
+    addLog('🔗 Gemini is connected. Initializing model strategies...', 'info');
+
+    for (const modelId of selectedModels) {
+      // ✅ FIX: Use availableModels instead of MODELS
+      const modelObj = availableModels.find(m => m.id === modelId);
+
+      if (modelObj) {
+        console.log(`🎯 Triggering trade for: ${modelObj.name} (ID: ${modelObj.id})`);
+        addLog(`🤖 Activating ${modelObj.name}...`, 'info');
+
+        try {
+          await handleStartGeminiTrading(modelObj);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (error) {
+          console.error(`❌ Error starting trade for ${modelObj.name}:`, error);
+          addLog(`❌ Failed to start ${modelObj.name}: ${error.message}`, 'error');
+        }
+      } else {
+        console.warn(`⚠️ Model ID ${modelId} not found in availableModels array`);
+        addLog(`⚠️ Model ${modelId} not found`, 'warning');
+      }
+    }
+
+    addLog('✅ All models initialized', 'success');
+  } else {
+    addLog('⚠️ Gemini not connected. Trading in simulator mode only.', 'warning');
   }
 };
 
@@ -2785,7 +3136,7 @@ const handleCloseAllGeminiTrading = async () => {
       </div>
 
       {/* MODEL SELECTION */}
-      {availableModels.length > 0 && (
+      {/*{availableModels.length > 0 && (
         <div
           style={{
             background: '#f0f4ff',
@@ -2889,7 +3240,7 @@ const handleCloseAllGeminiTrading = async () => {
                   )}
 
                   {/* ✅ Model will auto-select symbol - no manual buttons needed */}
-                  {isGeminiConnected && isSelected && (
+                  {/*{isGeminiConnected && isSelected && (
                     <div
                       style={{
                         marginTop: '8px',
@@ -2911,7 +3262,7 @@ const handleCloseAllGeminiTrading = async () => {
             })}
           </div>
         </div>
-      )}
+      )} */}
 
       {/* TRADING CONTROLS */}
       <div
@@ -3333,7 +3684,7 @@ const handleCloseAllGeminiTrading = async () => {
           )}
         </div>
 
-        {/* Other Models Overview */}
+        {/* Other Models Overview - Now with Direct Selection */}
         {availableModels.length > 0 && (
           <div
             style={{
@@ -3344,16 +3695,51 @@ const handleCloseAllGeminiTrading = async () => {
               border: '1px solid #90caf9'
             }}
           >
-            <h3 style={{ marginTop: 0, marginBottom: '12px' }}>
-              Other Models Overview (Live Values)
-              {selectedModels.length > 0 && (
-                <span style={{ fontSize: '14px', fontWeight: 'normal', color: '#666', marginLeft: '10px' }}>
-                  ({nonSelectedModels.length} not selected)
-                </span>
-              )}
-            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <h3 style={{ margin: 0 }}>
+                Models Overview (Click to Select/Deselect)
+                {selectedModels.length > 0 && (
+                  <span style={{ fontSize: '14px', fontWeight: 'normal', color: '#666', marginLeft: '10px' }}>
+                    ({selectedModels.length} selected)
+                  </span>
+                )}
+              </h3>
+              
+              {/* Select All / Deselect All Button */}
+              <button
+                onClick={() => {
+                  if (selectedModels.length === availableModels.length) {
+                    // Deselect all
+                    setSelectedModels([]);
+                  } else {
+                    // Select all
+                    setSelectedModels(availableModels.map(m => m.id || m.name));
+                  }
+                }}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid #90caf9',
+                  backgroundColor: '#ffffff',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  fontWeight: 'bold',
+                  color: '#1976d2',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#e3f2fd';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = '#ffffff';
+                }}
+              >
+                {selectedModels.length === availableModels.length ? 'Deselect All' : 'Select All'}
+              </button>
+            </div>
 
-            {isTrading && nonSelectedModels.length > 0 && (
+            {/* Total P/L for Selected Models */}
+            {isTrading && selectedModels.length > 0 && (
               <div
                 style={{
                   display: 'flex',
@@ -3361,22 +3747,25 @@ const handleCloseAllGeminiTrading = async () => {
                   alignItems: 'center',
                   flexWrap: 'wrap',
                   gap: '10px',
-                  marginBottom: '12px'
+                  marginBottom: '12px',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  backgroundColor: '#e8f5e9',
+                  border: '1px solid #4caf50'
                 }}
               >
-                <div style={{ fontSize: '13px', color: '#555', fontWeight: 'bold' }}>
-                  Total P/L for Other Models:
+                <div style={{ fontSize: '13px', color: '#2e7d32', fontWeight: 'bold' }}>
+                  Total P/L for Selected Models:
                 </div>
 
                 {(() => {
-                  const otherTotalProfit = nonSelectedModels.reduce((sum, model, idx) => {
-                    const modelId = model.id || model.name || `model_${idx}`;
+                  const selectedTotalProfit = selectedModels.reduce((sum, modelId) => {
                     const currentValue = getNormalizedValue(modelId);
                     return sum + (currentValue - startValue);
                   }, 0);
 
-                  const denom = startValue * nonSelectedModels.length;
-                  const otherTotalProfitPercent = denom > 0 ? ((otherTotalProfit / denom) * 100).toFixed(2) : '0.00';
+                  const denom = startValue * selectedModels.length;
+                  const selectedTotalProfitPercent = denom > 0 ? ((selectedTotalProfit / denom) * 100).toFixed(2) : '0.00';
 
                   return (
                     <div
@@ -3384,28 +3773,30 @@ const handleCloseAllGeminiTrading = async () => {
                         padding: '10px 16px',
                         borderRadius: '6px',
                         backgroundColor: '#ffffff',
-                        border: '2px solid #90caf9',
+                        border: '2px solid #4caf50',
                         boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
                         fontWeight: 'bold',
                         fontSize: '18px',
-                        color: otherTotalProfit >= 0 ? '#2e7d32' : '#c62828'
+                        color: selectedTotalProfit >= 0 ? '#2e7d32' : '#c62828'
                       }}
                     >
-                      {otherTotalProfit >= 0 ? '+' : ''}${Math.abs(Math.round(otherTotalProfit)).toLocaleString()} ({otherTotalProfitPercent}%)
+                      {selectedTotalProfit >= 0 ? '+' : ''}${Math.abs(Math.round(selectedTotalProfit)).toLocaleString()} ({selectedTotalProfitPercent}%)
                     </div>
                   );
                 })()}
               </div>
             )}
 
+            {/* Models Grid */}
             {nonSelectedModels.length === 0 ? (
               <div style={{ padding: '20px', textAlign: 'center', color: '#666', fontSize: '14px', fontStyle: 'italic' }}>
-                All models are currently selected for trading
+                No models available
               </div>
             ) : (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
                 {nonSelectedModels.map((model, idx) => {
                   const modelId = model.id || model.name || `model_${idx}`;
+                  const isSelected = selectedModels.includes(modelId);
                   const currentValue = getNormalizedValue(modelId);
                   const color = model.color || '#1976d2';
 
@@ -3419,64 +3810,97 @@ const handleCloseAllGeminiTrading = async () => {
                   return (
                     <div
                       key={modelId}
-                      onClick={() => handleModelSelection(modelId)}
+                      onClick={() => {
+                        // Toggle selection
+                        if (isSelected) {
+                          setSelectedModels(prev => prev.filter(id => id !== modelId));
+                        } else {
+                          setSelectedModels(prev => [...prev, modelId]);
+                        }
+                      }}
                       style={{
                         padding: '15px',
                         borderRadius: '10px',
-                        backgroundColor: '#ffffff',
-                        border: `3px solid #cccccc`,
+                        backgroundColor: isSelected ? '#e3f2fd' : '#ffffff',
+                        border: isSelected ? `3px solid ${color}` : '3px solid #cccccc',
                         minWidth: '200px',
                         cursor: 'pointer',
                         transition: 'all 0.2s ease',
-                        boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+                        boxShadow: isSelected ? '0 4px 10px rgba(0,0,0,0.25)' : '0 1px 3px rgba(0,0,0,0.15)',
                         transform: 'translateY(0)',
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: '6px'
+                        gap: '6px',
+                        position: 'relative'
                       }}
                       onMouseOver={(e) => {
                         e.currentTarget.style.transform = 'translateY(-2px)';
                         e.currentTarget.style.boxShadow = '0 4px 10px rgba(0,0,0,0.25)';
-                        e.currentTarget.style.border = `3px solid ${color}`;
+                        if (!isSelected) {
+                          e.currentTarget.style.border = `3px solid ${color}`;
+                          e.currentTarget.style.backgroundColor = '#f5f5f5';
+                        }
                       }}
                       onMouseOut={(e) => {
                         e.currentTarget.style.transform = 'translateY(0)';
-                        e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.15)';
-                        e.currentTarget.style.border = '3px solid #cccccc';
+                        e.currentTarget.style.boxShadow = isSelected ? '0 4px 10px rgba(0,0,0,0.25)' : '0 1px 3px rgba(0,0,0,0.15)';
+                        if (!isSelected) {
+                          e.currentTarget.style.border = '3px solid #cccccc';
+                          e.currentTarget.style.backgroundColor = '#ffffff';
+                        }
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      {/* Selection Indicator */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: '10px',
+                          right: '10px',
+                          width: '24px',
+                          height: '24px',
+                          borderRadius: '50%',
+                          backgroundColor: isSelected ? color : '#eeeeee',
+                          border: isSelected ? `2px solid ${color}` : '2px solid #bdbdbd',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'white',
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          transition: 'all 0.2s ease'
+                        }}
+                      >
+                        {isSelected && '✓'}
+                      </div>
+
+                      {/* Model Name */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', paddingRight: '30px' }}>
                         <div
                           style={{
-                            width: '22px',
-                            height: '22px',
+                            width: '12px',
+                            height: '12px',
                             borderRadius: '50%',
-                            backgroundColor: '#eeeeee',
-                            border: '1px solid #bdbdbd',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: 'white',
-                            fontSize: '14px',
-                            fontWeight: 'bold',
+                            backgroundColor: color,
                             flexShrink: 0
                           }}
-                        >
-                        </div>
+                        />
                         <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#333' }}>
                           {model.name || modelId}
                         </div>
                       </div>
 
+                      {/* Current Value */}
                       <div style={{ fontSize: '20px', fontWeight: 'bold', color }}>
                         ${currentValue.toLocaleString()}
                       </div>
 
+                      {/* P/L Display (when trading) */}
                       {isTrading && initialValues[modelId] != null && (
                         <div
                           style={{
                             fontSize: '12px',
                             marginTop: '2px',
+                            fontWeight: 'bold',
                             color: pnl >= 0 ? '#2e7d32' : '#c62828'
                           }}
                         >
@@ -3484,9 +3908,17 @@ const handleCloseAllGeminiTrading = async () => {
                         </div>
                       )}
 
+                      {/* Live Indicator (when not trading) */}
                       {!isTrading && (
                         <div style={{ fontSize: '11px', color: '#4CAF50', fontWeight: 'bold' }}>
                           🔴 LIVE
+                        </div>
+                      )}
+
+                      {/* Model Description (if available) */}
+                      {model.description && (
+                        <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic', marginTop: '4px', lineHeight: '1.3' }}>
+                          {model.description}
                         </div>
                       )}
                     </div>
@@ -3497,6 +3929,32 @@ const handleCloseAllGeminiTrading = async () => {
           </div>
         )}
       </div>
+
+      {/* ✅ SYSTEM LOGS PANEL - ADD THIS ENTIRE BLOCK */}
+        <div style={{
+          height: '150px',
+          overflowY: 'auto',
+          backgroundColor: '#1e1e1e',
+          color: '#00ff00',
+          padding: '10px',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          borderRadius: '8px',
+          marginTop: '20px',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }}>
+          <div style={{ borderBottom: '1px solid #333', marginBottom: '5px', fontWeight: 'bold', paddingBottom: '5px' }}>
+            SYSTEM LOGS
+          </div>
+          {tradingLogs.map((log, i) => (
+            <div key={i} style={{ 
+              marginBottom: '2px', 
+              color: log.type === 'error' ? '#ff4444' : log.type === 'success' ? '#00ff00' : log.type === 'warning' ? '#ffaa00' : '#aaa' 
+            }}>
+              [{log.timestamp}] {log.message}
+            </div>
+          ))}
+        </div>
 
       {/* ✅ My Real Gemini Positions */}
         {isGeminiConnected && (
@@ -3566,7 +4024,7 @@ const handleCloseAllGeminiTrading = async () => {
           </div>
         )} 
 
-      {/* ✅ Last 20 Market Trades from Gemini */}
+      {/* ✅ Unified Last 20 Market Trades from Gemini */}
       {isGeminiConnected && (
         <div
           style={{
@@ -3577,81 +4035,95 @@ const handleCloseAllGeminiTrading = async () => {
             boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
           }}
         >
-          <h2 style={{ marginTop: 0, marginBottom: '15px' }}>💎 Last 20 Market Trades (Gemini)</h2>
+          <h2 style={{ marginTop: 0, marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '24px' }}>💎</span> 
+            Last 20 Market Trades (Gemini)
+          </h2>
           
           <div style={{ overflowX: 'auto' }}>
-            <div
+            <table
               style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-                gap: '16px',
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '14px',
               }}
             >
-              {[
-                { title: 'BTCUSD', trades: btcTrades },
-                { title: 'ETHUSD', trades: ethTrades },
-                { title: 'SOLUSD', trades: solTrades },
-              ].map(({ title, trades }) => (
-                <div key={title} style={{ border: '1px solid #eee', borderRadius: '6px' }}>
-                  <div
-                    style={{
-                      padding: '8px 12px',
-                      borderBottom: '1px solid #eee',
-                      fontWeight: 'bold',
-                    }}
-                  >
-                    {title}
-                  </div>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                    <thead>
-                      <tr style={{ backgroundColor: '#fafafa' }}>
-                        <th style={{ padding: '6px', textAlign: 'left' }}>Time</th>
-                        <th style={{ padding: '6px', textAlign: 'center' }}>Type</th>
-                        <th style={{ padding: '6px', textAlign: 'right' }}>Price</th>
-                        <th style={{ padding: '6px', textAlign: 'right' }}>Amount</th>
+              <thead>
+                <tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ddd' }}>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Time</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Model</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Symbol</th>
+                  <th style={{ padding: '12px', textAlign: 'center' }}>Type</th>
+                  <th style={{ padding: '12px', textAlign: 'right' }}>Price</th>
+                  <th style={{ padding: '12px', textAlign: 'right' }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(() => {
+                  // Merge all trades into one array and add symbol info
+                  const combinedTrades = [
+                    ...btcTrades.map(t => ({ ...t, symbol: 'BTCUSD' })),
+                    ...ethTrades.map(t => ({ ...t, symbol: 'ETHUSD' })),
+                    ...solTrades.map(t => ({ ...t, symbol: 'SOLUSD' }))
+                  ];
+
+                  // Sort by timestamp descending (newest first) and take top 20
+                  const sortedTrades = combinedTrades
+                    .sort((a, b) => b.timestampms - a.timestampms)
+                    .slice(0, 20);
+
+                  if (sortedTrades.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan="6" style={{ padding: '20px', textAlign: 'center', color: '#999', fontStyle: 'italic' }}>
+                          Waiting for market data...
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {trades && trades.length > 0 ? (
-                        trades.map((trade, index) => (
-                          <tr key={trade.tid || index} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                            <td style={{ padding: '6px', color: '#666' }}>
-                              {new Date(trade.timestampms).toLocaleTimeString()}
-                            </td>
-                            <td style={{ padding: '6px', textAlign: 'center' }}>
-                              <span
-                                style={{
-                                  padding: '2px 8px',
-                                  borderRadius: '4px',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
-                                  color: trade.type === 'buy' ? '#2e7d32' : '#c62828',
-                                }}
-                              >
-                                {trade.type.toUpperCase()}
-                              </span>
-                            </td>
-                            <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
-                              ${parseFloat(trade.price).toLocaleString()}
-                            </td>
-                            <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'monospace' }}>
-                              {parseFloat(trade.amount).toFixed(4)}
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={4} style={{ padding: '8px', textAlign: 'center', color: '#999' }}>
-                            No trades yet
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              ))}
-            </div>
+                    );
+                  }
+
+                  return sortedTrades.map((trade, index) => (
+                    <tr 
+                      key={trade.tid || index} 
+                      style={{ 
+                        borderBottom: '1px solid #eee',
+                        backgroundColor: index % 2 === 0 ? '#ffffff' : '#fafafa' 
+                      }}
+                    >
+                      <td style={{ padding: '10px', color: '#666' }}>
+                        {new Date(trade.timestampms).toLocaleTimeString()}
+                      </td>
+                      <td style={{ padding: '10px', fontWeight: 'bold', color: '#333' }}>
+                        Gemini Market
+                      </td>
+                      <td style={{ padding: '10px', fontWeight: '600' }}>
+                        {trade.symbol}
+                      </td>
+                      <td style={{ padding: '10px', textAlign: 'center' }}>
+                        <span
+                          style={{
+                            padding: '4px 10px',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            backgroundColor: trade.type === 'buy' ? '#e8f5e9' : '#ffebee',
+                            color: trade.type === 'buy' ? '#2e7d32' : '#c62828',
+                          }}
+                        >
+                          {trade.type.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px', textAlign: 'right', fontFamily: 'monospace', fontWeight: 'bold' }}>
+                        ${parseFloat(trade.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </td>
+                      <td style={{ padding: '10px', textAlign: 'right', fontFamily: 'monospace' }}>
+                        {parseFloat(trade.amount).toFixed(4)}
+                      </td>
+                    </tr>
+                  ));
+                })()}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -3755,31 +4227,7 @@ const handleCloseAllGeminiTrading = async () => {
           </div>
         )}
       </div>
-      {/* ✅ SYSTEM LOGS PANEL - ADD THIS ENTIRE BLOCK */}
-      <div style={{
-        height: '150px',
-        overflowY: 'auto',
-        backgroundColor: '#1e1e1e',
-        color: '#00ff00',
-        padding: '10px',
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        borderRadius: '8px',
-        marginTop: '20px',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-      }}>
-        <div style={{ borderBottom: '1px solid #333', marginBottom: '5px', fontWeight: 'bold', paddingBottom: '5px' }}>
-          SYSTEM LOGS
-        </div>
-        {tradingLogs.map((log, i) => (
-          <div key={i} style={{ 
-            marginBottom: '2px', 
-            color: log.type === 'error' ? '#ff4444' : log.type === 'success' ? '#00ff00' : log.type === 'warning' ? '#ffaa00' : '#aaa' 
-          }}>
-            [{log.timestamp}] {log.message}
-          </div>
-        ))}
-      </div>
+      
     </div>
   );
 }

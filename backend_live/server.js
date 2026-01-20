@@ -102,9 +102,11 @@ app.get('/api/app-state', async (req, res) => {
   }
 });
 
+// backend/server.js
+
 app.put('/api/app-state', async (req, res) => {
   try {
-    const { userId, state, socketId } = req.body; // ✅ Accept socketId from frontend
+    const { userId, state, socketId } = req.body;
     
     if (!userId || !state) {
       return res.status(400).json({ success: false, error: 'Missing userId or state' });
@@ -115,16 +117,27 @@ app.put('/api/app-state', async (req, res) => {
       [userId, JSON.stringify(state), JSON.stringify(state)]
     );
 
-    // ✅ Broadcast to all devices EXCEPT the sender
     if (socketId && socketsById.has(socketId)) {
-      // Exclude the sender by broadcasting to all OTHER sockets in the room
       const senderSocket = socketsById.get(socketId);
       senderSocket.to(userId).emit('app_state_sync', state);
-      console.log(`📤 State synced to other devices (excluded sender: ${socketId})`);
     } else {
-      // Fallback: broadcast to all (if socketId not provided or invalid)
       io.to(userId).emit('app_state_sync', state);
-      console.log(`📤 State synced to all devices (no sender exclusion)`);
+    }
+
+    // ✅ Implementation: Ensure all models reset to the specific startingValue entered
+    if (state.isTrading && state.initialValues) {
+      // Use the value from the state, fallback to 100 if not provided
+      const startValue = parseFloat(state.startingValue) || 100;
+      
+      console.log(`🚀 Trading started for user ${userId}. Resetting all models to $${startValue}`);
+      
+      io.to(userId).emit('models_reset', {
+        initialValues: state.initialValues,
+        startingValue: startValue, // This is the value you entered in the UI
+        sessionId: state.tradingSession?.sessionId,
+        startTime: state.tradingSession?.startTime,
+        entryPrices: state.tradingSession?.entryPrices || {}
+      });
     }
 
     res.json({ success: true });
@@ -259,6 +272,27 @@ const geminiMarketTradesCache = {
   ethusd: [],
   solusd: []
 };
+
+/* ----------------------------------------
+   PERMANENT LOG ARCHIVE ENDPOINT
+-----------------------------------------*/
+app.post('/api/logs/archive', async (req, res) => {
+  try {
+    const { userId, message, type } = req.body;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    // Save to permanent archive table
+    await db.query(
+      'INSERT INTO trade_logs_archive (user_id, message, type) VALUES (?, ?, ?)',
+      [userId, message, type]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Archiving error:', err);
+    res.status(500).json({ success: false, error: 'Failed to archive log' });
+  }
+});
 
 /* ------------------------------
    GEMINI API HELPER FUNCTIONS
@@ -612,10 +646,53 @@ app.get('/api/gemini/open-positions', (req, res) => {
  */
 app.post('/api/gemini/close-all', async (req, res) => {
   try {
-    const { apiKey, apiSecret, env = 'live', modelId } = req.body || {};
+    const { apiKey, apiSecret, env = 'live', modelId, userId } = req.body || {};
+
+    // ✅ NEW: Allow closing positions using userId (fetch creds from DB) if apiKey/apiSecret not provided
+    let finalApiKey = apiKey;
+    let finalApiSecret = apiSecret;
+    let finalEnv = env;
+
+    if ((!finalApiKey || !finalApiSecret) && userId) {
+      console.log('🔐 /api/gemini/close-all using userId credentials lookup:', userId);
+
+      const [rows] = await db.query(
+        'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+        [userId]
+      );
+
+      if (!rows.length) {
+        return res.status(401).json({
+          success: false,
+          error: 'No Gemini credentials found for this user. Please connect Gemini first.',
+          reason: 'no_credentials',
+        });
+      }
+
+      const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
+      const storedEnv = rows[0].env || 'live';
+
+      let decryptedSecret;
+      try {
+        decryptedSecret = decrypt(api_secret_enc, iv, auth_tag);
+      } catch (e) {
+        console.error('❌ Failed to decrypt API secret:', e);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to decrypt Gemini credentials. Please reconnect Gemini.',
+          reason: 'decrypt_failed',
+        });
+      }
+
+      finalApiKey = api_key;
+      finalApiSecret = decryptedSecret;
+      finalEnv = finalEnv || storedEnv;
+
+      console.log('✅ Credentials loaded from database for user:', userId);
+    }
 
     // Validate credentials
-    if (!apiKey || !apiSecret) {
+    if (!finalApiKey || !finalApiSecret) {
       return res.status(400).json({
         success: false,
         error: 'API Key and API Secret are required',
@@ -648,13 +725,13 @@ app.post('/api/gemini/close-all', async (req, res) => {
         const closeSide = pos.side === 'LONG' ? 'sell' : 'buy';
 
         // ✅ IOC LIMIT close (Gemini rejects exchange market for you)
-        const t = await getGeminiTicker(symbol, env);
+        const t = await getGeminiTicker(symbol, finalEnv);
 
         const isSell = closeSide === 'sell'; // sell closes LONG, buy closes SHORT
         const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
 
         if (!basePx || basePx <= 0) {
-          throw new Error(`No valid ticker price for ${symbol} (${env})`);
+          throw new Error(`No valid ticker price for ${symbol} (${finalEnv})`);
         }
 
         // ✅ Nudge price with 3% slippage so it fills immediately like a market order
@@ -667,7 +744,7 @@ app.post('/api/gemini/close-all', async (req, res) => {
           type: 'exchange limit',
           price: toUsdPrice2(px),
           options: ['immediate-or-cancel'],
-          env,
+          env: finalEnv,
           account: 'primary',
         };
 
@@ -675,7 +752,7 @@ app.post('/api/gemini/close-all', async (req, res) => {
           `🔻 Closing ${pos.modelName} ${symbol.toUpperCase()} ${pos.side} (${closeSide.toUpperCase()}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask})`
         );
 
-        const order = await geminiRequest(apiKey, apiSecret, '/v1/order/new', orderPayload);
+        const order = await geminiRequest(finalApiKey, finalApiSecret, '/v1/order/new', orderPayload);
 
         const executed = parseFloat(order.executed_amount || '0');
         const isLive = !!order.is_live;
@@ -760,7 +837,7 @@ app.post('/api/gemini/close-all', async (req, res) => {
       reason: 'server_error',
     });
   }
-}); 
+});
 
 /**
  * ✅ NEW: Clear all in-memory Gemini positions (for reset/cleanup)
@@ -1573,9 +1650,54 @@ app.post("/api/gemini/order", async (req, res) => {
     // LOG 1: raw body
     console.log('📥 /api/gemini/order RAW body:', req.body);
 
+    // ✅ NEW: Allow placing orders using userId (fetch creds from DB) if apiKey/apiSecret not provided
+    let effectiveApiKey = req.body.apiKey;
+    let effectiveApiSecret = req.body.apiSecret;
+    let effectiveEnv = req.body.env || 'live';
+
+    if ((!effectiveApiKey || !effectiveApiSecret) && req.body?.userId) {
+      const userId = req.body.userId;
+
+      console.log('🔐 /api/gemini/order using userId credentials lookup:', userId);
+
+      const [rows] = await db.query(
+        'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+        [userId]
+      );
+
+      if (!rows.length) {
+        return res.status(401).json({
+          success: false,
+          error: 'No Gemini credentials found for this user. Please connect Gemini first.',
+          reason: 'no_credentials',
+        });
+      }
+
+      const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
+      const storedEnv = rows[0].env || 'live';
+
+      let decryptedSecret;
+      try {
+        decryptedSecret = decrypt(api_secret_enc, iv, auth_tag);
+      } catch (e) {
+        console.error('❌ Failed to decrypt API secret:', e);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to decrypt Gemini credentials. Please reconnect Gemini.',
+          reason: 'decrypt_failed',
+        });
+      }
+
+      // ✅ Use decrypted credentials
+      effectiveApiKey = api_key;
+      effectiveApiSecret = decryptedSecret;
+      effectiveEnv = effectiveEnv || storedEnv;
+
+      console.log('✅ Credentials loaded from database for user:', userId);
+    }
+
+    // Now extract all other fields
     const {
-      apiKey,
-      apiSecret,
       symbol,
       side,
       amount,
@@ -1584,15 +1706,14 @@ app.post("/api/gemini/order", async (req, res) => {
       modelId,
       modelName,
       closePosition,
-      env = 'live',
     } = req.body;
 
     const isClosing = (closePosition === true || closePosition === 'true');
 
     // LOG 2: parsed fields
     console.log('📥 /api/gemini/order parsed:', {
-      apiKey: apiKey ? '[provided]' : '[missing]',
-      apiSecret: apiSecret ? '[provided]' : '[missing]',
+      apiKey: effectiveApiKey ? '[provided]' : '[missing]',
+      apiSecret: effectiveApiSecret ? '[provided]' : '[missing]',
       symbol,
       side,
       amount,
@@ -1602,11 +1723,11 @@ app.post("/api/gemini/order", async (req, res) => {
       modelName,
       closePosition,
       isClosing,
-      env,
+      env: effectiveEnv,
     });
 
     // Validate input
-    if (!apiKey || !apiSecret) {
+    if (!effectiveApiKey || !effectiveApiSecret) {
       console.error('❌ Validation failed: Missing API credentials');
       return res.status(400).json({
         success: false,
@@ -1687,7 +1808,7 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     console.log(
-      `🔗 [${env.toUpperCase()}] Placing ${side} order: ${amount} ${symbol} @ $${price} (model: ${
+      `🔗 [${effectiveEnv.toUpperCase()}] Placing ${side} order: ${amount} ${symbol} @ $${price} (model: ${
         modelName || 'N/A'
       }, close=${isClosing})`
     );
@@ -1701,13 +1822,13 @@ app.post("/api/gemini/order", async (req, res) => {
 
     // ✅ CLOSING: Use IOC LIMIT to simulate market (Gemini rejects exchange market for you)
     if (isClosing) {
-      const t = await getGeminiTicker(symbol, env);
+      const t = await getGeminiTicker(symbol, effectiveEnv);
 
       const isSell = side.toLowerCase() === 'sell'; // sell closes LONG, buy closes SHORT
       const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
 
       if (!basePx || basePx <= 0) {
-        throw new Error(`No valid ticker price for ${symbol} (${env})`);
+        throw new Error(`No valid ticker price for ${symbol} (${effectiveEnv})`);
       }
 
       // Nudge price so it fills immediately like a market order:
@@ -1743,13 +1864,13 @@ app.post("/api/gemini/order", async (req, res) => {
 
     console.log('📤 Sending to Gemini:', orderPayload);
 
-    // Call Gemini API to place order
-    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", {
+    // Call Gemini API to place order (using effective credentials)
+    const order = await geminiRequest(effectiveApiKey, effectiveApiSecret, "/v1/order/new", {
       ...orderPayload,
-      env,
+      env: effectiveEnv,
     });
 
-    console.log(`✅ [${env.toUpperCase()}] Order placed:`, {
+    console.log(`✅ [${effectiveEnv.toUpperCase()}] Order placed:`, {
       order_id: order.order_id,
       symbol: order.symbol,
       side: order.side,
@@ -2009,6 +2130,10 @@ app.post("/api/gemini/order", async (req, res) => {
   });
 
    console.log("Client connected:", socket.id);
+
+  socket.on('request_clear_logs', (userId) => {
+    io.to(userId).emit('clear_session_logs');
+  }); 
 
   // Send models snapshot
   const modelsSnapshot = MODELS.map(m => ({
