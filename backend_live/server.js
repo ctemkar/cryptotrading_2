@@ -9,6 +9,10 @@ const crypto = require("crypto");
 const axios = require("axios");
 
 const app = express();
+
+// ========================================
+// 1. MIDDLEWARE (FIRST)
+// ========================================
 app.use(cors());
 app.use(express.json());
 
@@ -36,7 +40,8 @@ const GEMINI_TICK_SIZE = {
 /* ----------------------------------------
    SOCKET TRACKING FOR BROADCAST EXCLUSION
 -----------------------------------------*/
-const socketsById = new Map(); // Track all connected sockets
+const socketsById = new Map(); // Track all connected sockets by socket.id
+const userSockets = new Map(); // Track userId -> Set of socket.id
 
 /**
  * Validate if order amount meets Gemini's minimum requirements
@@ -66,162 +71,6 @@ function validateOrderAmount(symbol, amount) {
   return { valid: true };
 }
 
-// ========================================
-// APP STATE ENDPOINTS
-// ========================================
-
-app.get('/api/app-state', async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
-
-    const [rows] = await db.query('SELECT state_json, version FROM user_app_state WHERE user_id = ?', [userId]);
-    
-    if (!rows.length) {
-      // Return default state
-      const defaultState = {
-        selectedModels: [],
-        startingValue: "100",
-        stopLoss: "",
-        profitTarget: "",
-        isTrading: false,
-        tradingStopped: false,
-        stopReason: "",
-        finalProfitLoss: null,
-        initialValues: {},
-        updateSpeed: "1500",
-        isMockTrading: true
-      };
-      return res.json({ success: true, state: defaultState, version: 0 });
-    }
-
-    return res.json({ success: true, state: rows[0].state_json, version: rows[0].version });
-  } catch (err) {
-    console.error('❌ Error fetching app state:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch app state' });
-  }
-});
-
-// backend/server.js
-
-app.put('/api/app-state', async (req, res) => {
-  try {
-    const { userId, state, socketId } = req.body;
-    
-    if (!userId || !state) {
-      return res.status(400).json({ success: false, error: 'Missing userId or state' });
-    }
-
-    await db.query(
-      'INSERT INTO user_app_state (user_id, state_json, version) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE state_json = ?, version = version + 1',
-      [userId, JSON.stringify(state), JSON.stringify(state)]
-    );
-
-    if (socketId && socketsById.has(socketId)) {
-      const senderSocket = socketsById.get(socketId);
-      senderSocket.to(userId).emit('app_state_sync', state);
-    } else {
-      io.to(userId).emit('app_state_sync', state);
-    }
-
-    // ✅ Implementation: Ensure all models reset to the specific startingValue entered
-    if (state.isTrading && state.initialValues) {
-      // Use the value from the state, fallback to 100 if not provided
-      const startValue = parseFloat(state.startingValue) || 100;
-      
-      console.log(`🚀 Trading started for user ${userId}. Resetting all models to $${startValue}`);
-      
-      io.to(userId).emit('models_reset', {
-        initialValues: state.initialValues,
-        startingValue: startValue, // This is the value you entered in the UI
-        sessionId: state.tradingSession?.sessionId,
-        startTime: state.tradingSession?.startTime,
-        entryPrices: state.tradingSession?.entryPrices || {}
-      });
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('❌ Error saving app state:', err);
-    return res.status(500).json({ success: false, error: 'Failed to save app state' });
-  }
-});
-
-// ========================================
-// GEMINI CREDENTIALS ENDPOINTS
-// ========================================
-
-app.post('/api/gemini/credentials', async (req, res) => {
-  try {
-    const { userId, apiKey, apiSecret, env } = req.body;
-    
-    if (!userId || !apiKey || !apiSecret) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-
-    const { enc, iv, authTag } = encrypt(apiSecret);
-
-    /*await db.query(
-      `INSERT INTO user_gemini_credentials (user_id, api_key, api_secret_enc, iv, auth_tag, env) 
-       VALUES (?, ?, ?, ?, ?, ?) 
-       ON DUPLICATE KEY UPDATE api_key=?, api_secret_enc=?, iv=?, auth_tag=?, env=?`,
-      [userId, apiKey, enc, iv, authTag, env || 'live', apiKey, enc, iv, authTag, env || 'live']
-    ); */
-
-    await db.query(
-      `INSERT INTO user_gemini_credentials (user_id, api_key, api_secret_enc, iv, auth_tag, env) 
-       VALUES (?, ?, ?, ?, ?, ?) 
-       ON DUPLICATE KEY UPDATE 
-         api_key = VALUES(api_key), 
-         api_secret_enc = VALUES(api_secret_enc), 
-         iv = VALUES(iv), 
-         auth_tag = VALUES(auth_tag), 
-         env = VALUES(env)`,
-      [userId, apiKey, enc, iv, authTag, env || 'live']
-    );
-
-    console.log(`✅ Securely stored Gemini keys for: ${userId}`);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('❌ DB Error saving credentials:', err);
-    return res.status(500).json({ success: false, error: 'Database error Failed to save credentials' });
-  }
-});
-
-// Check if user has credentials
-app.get('/api/gemini/credentials/status', async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
-
-    const [rows] = await db.query('SELECT env FROM user_gemini_credentials WHERE user_id = ?', [userId]);
-    
-    return res.json({
-      success: true,
-      hasCredentials: rows.length > 0,
-      env: rows[0]?.env || 'live'
-    });
-  } catch (err) {
-    console.error('❌ Error checking credentials status:', err);
-    return res.status(500).json({ success: false, error: 'Failed to check credentials' });
-  }
-});
-
-app.delete('/api/gemini/credentials', async (req, res) => {
-  try {
-    const { userId } = req.body;
-    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
-
-    await db.query('DELETE FROM user_gemini_credentials WHERE user_id = ?', [userId]);
-    
-    console.log(`🗑️ Deleted Gemini credentials for user ${userId}`);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('❌ Error deleting credentials:', err);
-    return res.status(500).json({ success: false, error: 'Failed to delete credentials' });
-  }
-});
-
 /* ------------------------------
    MYSQL DATABASE CONNECTION
 --------------------------------*/
@@ -243,6 +92,7 @@ async function initDatabase() {
     await db.query(`
       CREATE TABLE IF NOT EXISTS trades (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(255),
         model_id VARCHAR(50) NOT NULL,
         model_name VARCHAR(100) NOT NULL,
         action ENUM('BUY', 'SELL') NOT NULL,
@@ -252,11 +102,77 @@ async function initDatabase() {
         total_value DECIMAL(15, 2) NOT NULL,
         timestamp BIGINT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_user_id (user_id),
         INDEX idx_timestamp (timestamp DESC)
       )
     `);
 
-    console.log("✅ MySQL connected and trades table ready");
+    // Create user_app_state table
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_app_state (
+        user_id VARCHAR(255) PRIMARY KEY,
+        state_json LONGTEXT NOT NULL,
+        version INT DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create user_trading_session table
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_trading_session (
+        user_id VARCHAR(255) PRIMARY KEY,
+        is_active TINYINT(1) DEFAULT 0,
+        started_at TIMESTAMP NULL,
+        session_json TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create trade_logs_archive table
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS trade_logs_archive (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        session_id VARCHAR(255),
+        message TEXT NOT NULL,
+        type VARCHAR(50),
+        metadata JSON,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_user_session (user_id, session_id),
+        INDEX idx_timestamp (timestamp)
+      )
+    `);
+
+    // Create user_gemini_credentials table
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_gemini_credentials (
+        user_id VARCHAR(255) PRIMARY KEY,
+        api_key VARCHAR(255) NOT NULL,
+        api_secret_enc TEXT NOT NULL,
+        iv VARCHAR(255) NOT NULL,
+        auth_tag VARCHAR(255) NOT NULL,
+        env VARCHAR(20) DEFAULT 'live',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create gemini_open_positions table
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS gemini_open_positions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        model_id VARCHAR(100),
+        model_name VARCHAR(100),
+        symbol VARCHAR(20) NOT NULL,
+        side VARCHAR(10) NOT NULL,
+        amount VARCHAR(50) NOT NULL,
+        entry_price VARCHAR(50),
+        opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_user_model (user_id, model_id)
+      )
+    `);
+
+    console.log("✅ MySQL connected and all tables ready");
   } catch (error) {
     console.error("❌ MySQL connection failed:", error.message);
     process.exit(1);
@@ -266,108 +182,11 @@ async function initDatabase() {
 /* ------------------------------
    GEMINI MARKET TRADES CACHE
 --------------------------------*/
-// --- Gemini public trades cache (per symbol) ---
 const geminiMarketTradesCache = {
   btcusd: [],
   ethusd: [],
   solusd: []
 };
-
-/* ----------------------------------------
-   PERMANENT LOG ARCHIVE ENDPOINT
------------------------------------------*/
-app.post('/api/logs/archive', async (req, res) => {
-  try {
-    const { userId, message, type } = req.body;
-    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
-
-    // Save to permanent archive table
-    await db.query(
-      'INSERT INTO trade_logs_archive (user_id, message, type) VALUES (?, ?, ?)',
-      [userId, message, type]
-    );
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('❌ Archiving error:', err);
-    res.status(500).json({ success: false, error: 'Failed to archive log' });
-  }
-});
-
-/* ------------------------------
-   GEMINI API HELPER FUNCTIONS
---------------------------------*/
-/*async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
-  const url = "https://api.gemini.com" + path;
-  const nonce = Date.now().toString();
-  
-  const requestPayload = {
-    request: path,
-    nonce,
-    ...payload
-  };
-
-  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
-  const signature = crypto
-    .createHmac("sha384", apiSecret)
-    .update(encodedPayload)
-    .digest("hex");
-
-  const headers = {
-    "Content-Type": "text/plain",
-    "X-GEMINI-APIKEY": apiKey,
-    "X-GEMINI-PAYLOAD": encodedPayload,
-    "X-GEMINI-SIGNATURE": signature,
-    "Cache-Control": "no-cache"
-  };
-
-  const response = await axios.post(url, {}, { headers, timeout: 10000 });
-  return response.data;
-} */
-
-/*async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
-  const url = "https://api.gemini.com" + path;
-  const nonce = Date.now().toString();
-  
-  const requestPayload = {
-    request: path,
-    nonce,
-    ...payload
-  };
-
-  // ✅ FIX: For /v1/balances, add account parameter
-  if (path === "/v1/balances") {
-    requestPayload.account = "primary";  // Add this line
-  }
-
-  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString("base64");
-  
-  // ✅ FIX: Ensure apiSecret is treated as a string (no extra encoding)
-  const signature = crypto
-    //.createHmac("sha384", Buffer.from(apiSecret, 'utf-8'))  // Changed this line
-    .createHmac("sha384", apiSecret)  // ✅ Use apiSecret directly as string
-    .update(encodedPayload)
-    .digest("hex");
-
-  const headers = {
-    "Content-Type": "text/plain",
-    "Content-Length": "0",  // ✅ Added this required header
-    "X-GEMINI-APIKEY": apiKey,
-    "X-GEMINI-PAYLOAD": encodedPayload,
-    "X-GEMINI-SIGNATURE": signature,
-    "Cache-Control": "no-cache"
-  };
-
-  console.log("🔍 Debug - Request details:");
-  console.log("  Path:", path);
-  console.log("  API Key (first 10 chars):", apiKey.substring(0, 10) + "...");
-  console.log("  Payload:", JSON.stringify(requestPayload));
-  console.log("  Encoded Payload:", encodedPayload);
-  console.log("  Signature:", signature);
-
-  const response = await axios.post(url, {}, { headers, timeout: 10000 });
-  return response.data;
-} */
 
 // ========================================
 // ENCRYPTION SETUP
@@ -395,8 +214,10 @@ function decrypt(enc, iv, authTag) {
   return str;
 }
 
+/* ------------------------------
+   GEMINI API HELPER FUNCTIONS
+--------------------------------*/
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
-  // ✅ Choose base URL based on payload.env (default = live)
   const env = payload.env === 'sandbox' ? 'sandbox' : 'live';
   
   const baseUrl =
@@ -404,7 +225,6 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
       ? 'https://api.sandbox.gemini.com'
       : 'https://api.gemini.com';
 
-  // Remove env from the actual Gemini payload – we only used it to choose URL
   const { env: _ignoreEnv, ...restPayload } = payload;
 
   const url = baseUrl + path;
@@ -416,7 +236,6 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
     ...restPayload,
   };
 
-  // For balances and order/new, ensure account is present
   if (path === '/v1/balances') {
     requestPayload.account = requestPayload.account || 'primary';
   }
@@ -424,9 +243,7 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
     requestPayload.account = requestPayload.account || 'primary';
   }
 
-  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString(
-    'base64'
-  );
+  const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString('base64');
 
   const signature = crypto
     .createHmac('sha384', apiSecret)
@@ -448,9 +265,6 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   return response.data;
 }
 
-/* ------------------------------
-   GEMINI PRICE HELPER
---------------------------------*/
 async function getGeminiPrice(symbol, env = 'live') {
   try {
     const baseUrl =
@@ -484,15 +298,12 @@ async function getGeminiTicker(symbol, env = 'live') {
 }
 
 function toUsdPrice2(n) {
-  // Gemini USD pairs typically accept 2 decimals; keep it simple.
   return (Math.round(Number(n) * 100) / 100).toFixed(2);
 }
 
 /* -----------------------------------------
    LIVE GEMINI POSITION TRACKING (IN-MEMORY)
 ------------------------------------------*/
-
-// { [modelId_symbol]: { modelId, modelName, symbol, side, amount, entryPrice, openedAt } }
 const liveGeminiPositions = {};
 
 function livePosKey(modelId, symbol) {
@@ -510,14 +321,13 @@ function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price, sid
     modelId,
     modelName,
     symbol: symbol.toLowerCase(),
-    side: side.toUpperCase(), // 'LONG',
+    side: side.toUpperCase(),
     amount: parseFloat(amount),
     entryPrice: parseFloat(price),
     openedAt: Date.now(),
   };
   console.log('📌 [LIVE] Opened Gemini position:', liveGeminiPositions[key]);
 
-  // ✅ NEW: notify all clients that a position was opened
   io.emit('position_opened', {
     ...liveGeminiPositions[key],
   });
@@ -542,12 +352,11 @@ async function closeLiveGeminiPositionAndRecord({
   const entryPrice = pos.entryPrice;
   const exit = parseFloat(exitPrice);
 
-  // ✅ Calculate P&L based on position side and executed qty
   let pnl;
   if (pos.side === 'LONG') {
-    pnl = (exit - entryPrice) * qtyExecuted; // Profit when price rises
+    pnl = (exit - entryPrice) * qtyExecuted;
   } else if (pos.side === 'SHORT') {
-    pnl = (entryPrice - exit) * qtyExecuted; // Profit when price falls
+    pnl = (entryPrice - exit) * qtyExecuted;
   } else {
     pnl = 0;
   }
@@ -555,7 +364,6 @@ async function closeLiveGeminiPositionAndRecord({
   const timestamp = Date.now();
   const totalValue = (exit * qtyExecuted).toFixed(2);
 
-  // ✅ Determine closing action based on position side
   const closingAction = pos.side === 'LONG' ? 'SELL' : 'BUY';
 
   await db.query(
@@ -573,17 +381,14 @@ async function closeLiveGeminiPositionAndRecord({
     ]
   );
 
-  // ✅ Update in‑memory position for partial closes
   const remaining = pos.amount - qtyExecuted;
 
   if (remaining <= 0.00000001) {
-    // Fully closed
     delete liveGeminiPositions[key];
     console.log(
       `✅ [LIVE] Fully closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qtyExecuted}, P&L = ${pnl.toFixed(2)}`
     );
   } else {
-    // Partial close: reduce remaining amount
     liveGeminiPositions[key].amount = remaining;
     console.log(
       `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)}`
@@ -614,266 +419,6 @@ async function closeLiveGeminiPositionAndRecord({
   };
 }
 
-// ✅ NEW: API to get all current live Gemini positions (per model & symbol)
-app.get('/api/gemini/open-positions', (req, res) => {
-  try {
-    const positions = Object.values(liveGeminiPositions);
-    return res.json({
-      success: true,
-      positions,
-    });
-  } catch (err) {
-    console.error('❌ Error getting open positions:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to get open positions',
-    });
-  }
-});
-
-/**
- * Close all open Gemini positions for a given model (or all models)
- * Body: { apiKey, apiSecret, env, modelId? }
- */
-/**
- * Close all open Gemini positions for a given model (or all models)
- * Body: { apiKey, apiSecret, env, modelId? }
- */
-
-/**
- * Close all open Gemini positions for a given model (or all models)
- * Body: { apiKey, apiSecret, env='live', modelId? }
- */
-app.post('/api/gemini/close-all', async (req, res) => {
-  try {
-    const { apiKey, apiSecret, env = 'live', modelId, userId } = req.body || {};
-
-    // ✅ NEW: Allow closing positions using userId (fetch creds from DB) if apiKey/apiSecret not provided
-    let finalApiKey = apiKey;
-    let finalApiSecret = apiSecret;
-    let finalEnv = env;
-
-    if ((!finalApiKey || !finalApiSecret) && userId) {
-      console.log('🔐 /api/gemini/close-all using userId credentials lookup:', userId);
-
-      const [rows] = await db.query(
-        'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
-        [userId]
-      );
-
-      if (!rows.length) {
-        return res.status(401).json({
-          success: false,
-          error: 'No Gemini credentials found for this user. Please connect Gemini first.',
-          reason: 'no_credentials',
-        });
-      }
-
-      const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
-      const storedEnv = rows[0].env || 'live';
-
-      let decryptedSecret;
-      try {
-        decryptedSecret = decrypt(api_secret_enc, iv, auth_tag);
-      } catch (e) {
-        console.error('❌ Failed to decrypt API secret:', e);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to decrypt Gemini credentials. Please reconnect Gemini.',
-          reason: 'decrypt_failed',
-        });
-      }
-
-      finalApiKey = api_key;
-      finalApiSecret = decryptedSecret;
-      finalEnv = finalEnv || storedEnv;
-
-      console.log('✅ Credentials loaded from database for user:', userId);
-    }
-
-    // Validate credentials
-    if (!finalApiKey || !finalApiSecret) {
-      return res.status(400).json({
-        success: false,
-        error: 'API Key and API Secret are required',
-        reason: 'missing_credentials',
-      });
-    }
-
-    // Collect positions to close
-    const allPositions = Object.values(liveGeminiPositions);
-    const positionsToClose = modelId
-      ? allPositions.filter(p => p.modelId === modelId)
-      : allPositions;
-
-    if (!positionsToClose.length) {
-      return res.status(400).json({
-        success: false,
-        error: modelId
-          ? `No open positions found for model ${modelId}`
-          : 'No open positions found',
-        reason: 'no_open_positions',
-      });
-    }
-
-    const results = [];
-    const errors = [];
-
-    for (const pos of positionsToClose) {
-      try {
-        const symbol = pos.symbol.toLowerCase(); // stored lower already
-        const closeSide = pos.side === 'LONG' ? 'sell' : 'buy';
-
-        // ✅ IOC LIMIT close (Gemini rejects exchange market for you)
-        const t = await getGeminiTicker(symbol, finalEnv);
-
-        const isSell = closeSide === 'sell'; // sell closes LONG, buy closes SHORT
-        const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
-
-        if (!basePx || basePx <= 0) {
-          throw new Error(`No valid ticker price for ${symbol} (${finalEnv})`);
-        }
-
-        // ✅ Nudge price with 3% slippage so it fills immediately like a market order
-        const px = isSell ? basePx * 0.97 : basePx * 1.03;
-
-        const orderPayload = {
-          symbol,
-          amount: String(pos.amount),
-          side: closeSide,
-          type: 'exchange limit',
-          price: toUsdPrice2(px),
-          options: ['immediate-or-cancel'],
-          env: finalEnv,
-          account: 'primary',
-        };
-
-        console.log(
-          `🔻 Closing ${pos.modelName} ${symbol.toUpperCase()} ${pos.side} (${closeSide.toUpperCase()}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask})`
-        );
-
-        const order = await geminiRequest(finalApiKey, finalApiSecret, '/v1/order/new', orderPayload);
-
-        const executed = parseFloat(order.executed_amount || '0');
-        const isLive = !!order.is_live;
-
-        if (isLive || executed <= 0) {
-          // Gemini accepted but didn't fill yet (or filled 0)
-          errors.push({
-            modelId: pos.modelId,
-            modelName: pos.modelName,
-            symbol: symbol.toUpperCase(),
-            error: `Close order not filled yet (is_live=${isLive}, executed=${executed})`,
-            reason: 'not_filled',
-            details: {
-              order_id: order.order_id,
-              is_live: order.is_live,
-              executed_amount: order.executed_amount,
-              remaining_amount: order.remaining_amount,
-            },
-          });
-          continue;
-        }
-
-        const exitPrice = parseFloat(order.avg_execution_price || order.price || '0');
-
-        const closingInfo = await closeLiveGeminiPositionAndRecord({
-          modelId: pos.modelId,
-          modelName: pos.modelName,
-          symbol,
-          amount: executed,     // use executed for accurate P&L
-          exitPrice: exitPrice,
-        });
-
-        results.push({
-          modelId: pos.modelId,
-          modelName: pos.modelName,
-          symbol: symbol.toUpperCase(),
-          side: pos.side,
-          closingAction: closeSide.toUpperCase(),
-          entryPrice: closingInfo?.entryPrice,
-          exitPrice: closingInfo?.exitPrice,
-          quantity: closingInfo?.quantity,
-          pnl: closingInfo?.pnl,
-          timestamp: closingInfo?.timestamp,
-          order_id: order.order_id,
-        });
-      } catch (err) {
-        const data = err.response?.data || {};
-        errors.push({
-          modelId: pos.modelId,
-          modelName: pos.modelName,
-          symbol: String(pos.symbol || '').toUpperCase(),
-          error: data.message || data.reason || err.message || 'Failed to close position',
-          reason: data.reason || 'close_failed',
-          details: data,
-        });
-      }
-    }
-
-    // If everything failed, surface as error
-    if (!results.length) {
-      return res.status(500).json({
-        success: false,
-        error: errors[0]?.error || 'Failed to close positions',
-        reason: 'all_failed',
-        results: [],
-        errors,
-      });
-    }
-
-    // Partial success is still success=true, but return errors too
-    return res.json({
-      success: true,
-      message: `Closed ${results.length} position(s)`,
-      results,
-      errors, // <-- important for your UI logs
-    });
-  } catch (err) {
-    console.error('❌ /api/gemini/close-all error:', err);
-    return res.status(500).json({
-      success: false,
-      error: err.message || 'Failed to close positions',
-      reason: 'server_error',
-    });
-  }
-});
-
-/**
- * ✅ NEW: Clear all in-memory Gemini positions (for reset/cleanup)
- * This does NOT place orders, just clears tracking
- */
-app.post('/api/gemini/clear-positions', (req, res) => {
-  try {
-    const { modelId } = req.body;
-
-    if (modelId) {
-      // Clear positions for specific model
-      const keysToDelete = Object.keys(liveGeminiPositions).filter(key =>
-        key.startsWith(`${modelId}_`)
-      );
-      keysToDelete.forEach(key => delete liveGeminiPositions[key]);
-      console.log(`🧹 Cleared ${keysToDelete.length} positions for model ${modelId}`);
-    } else {
-      // Clear ALL positions
-      const count = Object.keys(liveGeminiPositions).length;
-      Object.keys(liveGeminiPositions).forEach(key => delete liveGeminiPositions[key]);
-      console.log(`🧹 Cleared all ${count} positions`);
-    }
-
-    return res.json({
-      success: true,
-      message: 'Positions cleared from memory',
-    });
-  } catch (err) {
-    console.error('❌ Error clearing positions:', err);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to clear positions',
-    });
-  }
-});
-
 /* ------------------------------
    MODELS INITIAL STATE
 --------------------------------*/
@@ -893,7 +438,6 @@ const MAX_HISTORY = 200;
 let modelState = {};
 let modelHistory = {};
 
-// Initialize all models at the same starting value
 MODELS.forEach(m => {
   modelState[m.id] = {
     id: m.id,
@@ -917,7 +461,6 @@ const CRYPTO_SYMBOLS = [
 let cryptoPrices = {};
 let cryptoHistory = {};
 
-// Initialize crypto prices
 CRYPTO_SYMBOLS.forEach(c => {
   cryptoPrices[c.symbol] = c.startPrice;
   cryptoHistory[c.symbol] = [{ time: Date.now(), price: c.startPrice }];
@@ -928,22 +471,17 @@ CRYPTO_SYMBOLS.forEach(c => {
 -----------------------------------------*/
 async function generateTrade(modelId, modelName) {
   try {
-    // Random: pick a crypto
     const crypto = CRYPTO_SYMBOLS[Math.floor(Math.random() * CRYPTO_SYMBOLS.length)];
     const cryptoPrice = cryptoPrices[crypto.symbol];
 
-    // Random: BUY or SELL
     const action = Math.random() > 0.5 ? "BUY" : "SELL";
 
-    // Random quantity between 0.01 and 0.5
     const quantity = (Math.random() * 0.49 + 0.01).toFixed(4);
 
-    // Total value
     const totalValue = (cryptoPrice * quantity).toFixed(2);
 
     const timestamp = Date.now();
 
-    // Insert into database
     await db.query(
       `INSERT INTO trades (model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -952,7 +490,6 @@ async function generateTrade(modelId, modelName) {
 
     console.log(`📊 TRADE: ${modelName} ${action} ${quantity} ${crypto.symbol} @ $${cryptoPrice}`);
 
-    // Emit to all clients
     io.emit("new_trade", {
       model_id: modelId,
       model_name: modelName,
@@ -972,12 +509,11 @@ async function generateTrade(modelId, modelName) {
 /* ----------------------------------------
    CONFIGURABLE UPDATE INTERVAL
 -----------------------------------------*/
-let UPDATE_INTERVAL = 1500; // Default 1.5 seconds
+let UPDATE_INTERVAL = 1500;
 let updateIntervalId = null;
 let tradeIntervalId = null;
-let geminiTradesIntervalId = null; // NEW: for auto-polling Gemini trades
+let geminiTradesIntervalId = null;
 
-// Function to update model values
 function updateModels() {
   const now = Date.now();
   const updates = [];
@@ -986,20 +522,15 @@ function updateModels() {
     const state = modelState[m.id];
     const prev = state.accountValue;
 
-    // Random walk: add a small random change scaled by volatility
     const change = (Math.random() * 2 - 1) * state.volatility * 50;
     let updated = prev + change;
 
-    // Keep value positive
     if (updated < 100) updated = 100;
 
-    // Round to integer (no decimals)
     const intValue = Math.round(updated);
 
-    // Store latest
     state.accountValue = intValue;
 
-    // Store history
     modelHistory[m.id].push({
       time: now,
       accountValue: intValue
@@ -1020,11 +551,9 @@ function updateModels() {
     });
   });
 
-  // Send to all clients
   io.emit("models_update", updates);
 }
 
-// Function to update crypto prices
 function updateCryptoPrices() {
   const now = Date.now();
   const updates = {};
@@ -1032,21 +561,16 @@ function updateCryptoPrices() {
   CRYPTO_SYMBOLS.forEach(c => {
     const prev = cryptoPrices[c.symbol];
 
-    // Random walk for crypto prices
     const change = (Math.random() * 2 - 1) * prev * c.volatility;
     let updated = prev + change;
 
-    // Keep price positive and reasonable
     if (updated < prev * 0.5) updated = prev * 0.5;
     if (updated > prev * 1.5) updated = prev * 1.5;
 
-    // Round to 2 decimals
     const newPrice = Math.round(updated * 100) / 100;
 
-    // Store latest
     cryptoPrices[c.symbol] = newPrice;
 
-    // Store history
     cryptoHistory[c.symbol].push({
       time: now,
       price: newPrice
@@ -1061,14 +585,12 @@ function updateCryptoPrices() {
     updates[c.symbol] = newPrice;
   });
 
-  // Send to all clients
   io.emit("crypto_update", {
     latest: updates,
     time: now
   });
 }
 
-// Function to start the update interval
 function startUpdateInterval() {
   if (updateIntervalId) {
     clearInterval(updateIntervalId);
@@ -1082,30 +604,25 @@ function startUpdateInterval() {
   console.log(`Update interval set to ${UPDATE_INTERVAL}ms`);
 }
 
-// Function to start auto-trade generation (every 5-10 seconds per model)
 function startTradeGeneration() {
   if (tradeIntervalId) {
     clearInterval(tradeIntervalId);
   }
 
   tradeIntervalId = setInterval(() => {
-    // Randomly pick a model to generate a trade
     const randomModel = MODELS[Math.floor(Math.random() * MODELS.length)];
     generateTrade(randomModel.id, randomModel.name);
-  }, 7000); // Generate a trade every 7 seconds
+  }, 7000);
 
   console.log("✅ Auto-trade generation started");
 }
 
-// NEW: Function to auto-poll Gemini market trades and broadcast via WebSocket
-// NEW: Function to auto-poll Gemini market trades and broadcast via WebSocket
 function startGeminiTradesPolling() {
   if (geminiTradesIntervalId) {
     clearInterval(geminiTradesIntervalId);
   }
 
   geminiTradesIntervalId = setInterval(async () => {
-    // ✅ Poll all three symbols
     const symbols = ['btcusd', 'ethusd', 'solusd'];
     
     for (const symbol of symbols) {
@@ -1119,16 +636,282 @@ function startGeminiTradesPolling() {
         console.error(`❌ Failed to poll Gemini trades for ${symbol}:`, e.message);
       }
     }
-  }, 5000); // Poll every 5 seconds
+  }, 5000);
 
   console.log("✅ Gemini market trades auto-polling started for BTC, ETH, SOL (every 5s)");
 }
 
- 
+// ========================================
+// 2. API ROUTES (BEFORE STATIC FILES)
+// ========================================
 
-/* ----------------------------------------
-   API ENDPOINT: GET LAST 20 TRADES
------------------------------------------*/
+// APP STATE ENDPOINTS
+app.get('/api/app-state', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const [rows] = await db.query('SELECT state_json, version FROM user_app_state WHERE user_id = ?', [userId]);
+    
+    if (!rows.length) {
+      const defaultState = {
+        selectedModels: [],
+        startingValue: "100",
+        stopLoss: "",
+        profitTarget: "",
+        isTrading: false,
+        tradingStopped: false,
+        stopReason: "",
+        finalProfitLoss: null,
+        initialValues: {},
+        updateSpeed: "1500",
+        isMockTrading: true
+      };
+      return res.json({ success: true, state: defaultState, version: 0 });
+    }
+
+    return res.json({ success: true, state: rows[0].state_json, version: rows[0].version });
+  } catch (err) {
+    console.error('❌ Error fetching app state:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch app state' });
+  }
+});
+
+app.put('/api/app-state', async (req, res) => {
+  try {
+    const { userId, state, socketId, version } = req.body;
+    
+    if (!userId || !state) {
+      return res.status(400).json({ success: false, error: 'Missing userId or state' });
+    }
+
+    const clientVersion = version || 0;
+
+    const [rows] = await db.query('SELECT version FROM user_app_state WHERE user_id = ?', [userId]);
+    
+    let currentVersion = 0;
+    if (rows.length > 0) {
+      currentVersion = rows[0].version;
+    }
+
+    if (clientVersion < currentVersion) {
+      console.warn(`⚠️ Stale state update rejected for user ${userId} (client v${clientVersion}, server v${currentVersion})`);
+      return res.status(409).json({
+        success: false,
+        error: 'Stale state version',
+        currentVersion,
+      });
+    }
+
+    const newVersion = currentVersion + 1;
+
+    await db.query(
+      'INSERT INTO user_app_state (user_id, state_json, version) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE state_json = ?, version = ?',
+      [userId, JSON.stringify(state), newVersion, JSON.stringify(state), newVersion]
+    );
+
+    if (socketId && socketsById.has(socketId)) {
+      const senderSocket = socketsById.get(socketId);
+      senderSocket.to(`user:${userId}`).emit('app_state_sync', { state, version: newVersion });
+    } else {
+      io.to(`user:${userId}`).emit('app_state_sync', { state, version: newVersion });
+    }
+
+    if (state.isTrading && state.initialValues) {
+      const startValue = parseFloat(state.startingValue) || 100;
+      
+      console.log(`🚀 Trading started for user ${userId}. Resetting all models to $${startValue}`);
+      
+      io.to(`user:${userId}`).emit('models_reset', {
+        initialValues: state.initialValues,
+        startingValue: startValue,
+        sessionId: state.tradingSession?.sessionId,
+        startTime: state.tradingSession?.startTime,
+        entryPrices: state.tradingSession?.entryPrices || {}
+      });
+    }
+
+    res.json({ success: true, version: newVersion });
+  } catch (err) {
+    console.error('❌ Error saving app state:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save app state' });
+  }
+});
+
+// TRADING SESSION ENDPOINTS
+app.get('/api/trading-session', async (req, res) => {
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'Missing userId' });
+  }
+
+  try {
+    const [rows] = await db.query(
+      'SELECT is_active, started_at, session_json FROM user_trading_session WHERE user_id = ?',
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.json({ success: true, session: null });
+    }
+
+    const session = {
+      isActive: rows[0].is_active === 1,
+      startedAt: rows[0].started_at,
+      ...JSON.parse(rows[0].session_json || '{}'),
+    };
+
+    console.log(`✅ Fetched trading session for user ${userId}`);
+    res.json({ success: true, session });
+  } catch (error) {
+    console.error('❌ Error fetching trading session:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/trading-session', async (req, res) => {
+  const { userId, isActive, sessionData } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'Missing userId' });
+  }
+
+  try {
+    const sessionJson = JSON.stringify(sessionData || {});
+
+    await db.query(
+      `INSERT INTO user_trading_session (user_id, is_active, started_at, session_json, updated_at)
+       VALUES (?, ?, NOW(), ?, NOW())
+       ON DUPLICATE KEY UPDATE is_active = ?, session_json = ?, updated_at = NOW()`,
+      [userId, isActive ? 1 : 0, sessionJson, isActive ? 1 : 0, sessionJson]
+    );
+
+    console.log(`✅ Saved trading session for user ${userId} (active: ${isActive})`);
+
+    io.to(`user:${userId}`).emit('trading_session_sync', { isActive, sessionData });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error saving trading session:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// LOGS ARCHIVE ENDPOINTS
+app.get('/api/logs/archive', async (req, res) => {
+  const { userId, sessionId } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'Missing userId' });
+  }
+
+  try {
+    let query = 'SELECT * FROM trade_logs_archive WHERE user_id = ?';
+    const params = [userId];
+
+    if (sessionId) {
+      query += ' AND session_id = ?';
+      params.push(sessionId);
+    }
+
+    query += ' ORDER BY timestamp ASC';
+
+    const [rows] = await db.query(query, params);
+
+    console.log(`✅ Fetched ${rows.length} archived logs for user ${userId}`);
+    res.json({ success: true, logs: rows });
+  } catch (error) {
+    console.error('❌ Error fetching archived logs:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/logs/archive', async (req, res) => {
+  try {
+    const { userId, sessionId, message, type, metadata } = req.body;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const metadataJson = JSON.stringify(metadata || {});
+
+    await db.query(
+      'INSERT INTO trade_logs_archive (user_id, session_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, ?, NOW())',
+      [userId, sessionId || null, message, type, metadataJson]
+    );
+
+    console.log(`✅ Archived log for user ${userId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Archiving error:', err);
+    res.status(500).json({ success: false, error: 'Failed to archive log' });
+  }
+});
+
+// GEMINI CREDENTIALS ENDPOINTS
+app.post('/api/gemini/credentials', async (req, res) => {
+  try {
+    const { userId, apiKey, apiSecret, env } = req.body;
+    
+    if (!userId || !apiKey || !apiSecret) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    const { enc, iv, authTag } = encrypt(apiSecret);
+
+    await db.query(
+      `INSERT INTO user_gemini_credentials (user_id, api_key, api_secret_enc, iv, auth_tag, env) 
+       VALUES (?, ?, ?, ?, ?, ?) 
+       ON DUPLICATE KEY UPDATE 
+         api_key = VALUES(api_key), 
+         api_secret_enc = VALUES(api_secret_enc), 
+         iv = VALUES(iv), 
+         auth_tag = VALUES(auth_tag), 
+         env = VALUES(env)`,
+      [userId, apiKey, enc, iv, authTag, env || 'live']
+    );
+
+    console.log(`✅ Securely stored Gemini keys for: ${userId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('❌ DB Error saving credentials:', err);
+    return res.status(500).json({ success: false, error: 'Database error Failed to save credentials' });
+  }
+});
+
+app.get('/api/gemini/credentials/status', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const [rows] = await db.query('SELECT env FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    
+    return res.json({
+      success: true,
+      hasCredentials: rows.length > 0,
+      env: rows[0]?.env || 'live'
+    });
+  } catch (err) {
+    console.error('❌ Error checking credentials status:', err);
+    return res.status(500).json({ success: false, error: 'Failed to check credentials' });
+  }
+});
+
+app.delete('/api/gemini/credentials', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    await db.query('DELETE FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    
+    console.log(`🗑️ Deleted Gemini credentials for user ${userId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error deleting credentials:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete credentials' });
+  }
+});
+
+// TRADES ENDPOINT
 app.get("/api/trades", async (req, res) => {
   try {
     const [rows] = await db.query(
@@ -1141,133 +924,13 @@ app.get("/api/trades", async (req, res) => {
   }
 });
 
-/* ----------------------------------------
-   API ENDPOINT: GET GEMINI BALANCES
------------------------------------------*/
-/*app.post("/api/gemini/balances", async (req, res) => {
-  try {
-    console.log("📥 Received request body:", req.body);
-    const { apiKey, apiSecret } = req.body;
-
-    // Validate input
-    if (!apiKey || !apiSecret) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "API Key and API Secret are required" 
-      });
-    }
-
-    console.log("🔗 Connecting to Gemini API for balances...");
-    
-    // Call Gemini API
-    const balances = await geminiRequest(apiKey, apiSecret, "/v1/balances");
-    console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2)); // <-- add this
-    console.log("✅ Gemini API response received");
-
-    // Calculate total USD value and organize balances
-    let totalUsd = 0;
-    const balanceData = {
-      btc: 0,
-      eth: 0,
-      usdc: 0,
-      sol: 0,
-      other: []
-    };
-
-    // Get current crypto prices for USD conversion
-    const btcPrice = cryptoPrices["BTCUSDT"] || 95000;
-    const ethPrice = cryptoPrices["ETHUSDT"] || 3500;
-    const solPrice = cryptoPrices["SOLUSDT"] || 180;
-
-    balances.forEach(balance => {
-      const currency = balance.currency.toLowerCase();
-      const amount = parseFloat(balance.available) || 0;
-
-      if (amount > 0) {
-        switch(currency) {
-          case "btc":
-            balanceData.btc = amount;
-            totalUsd += amount * btcPrice;
-            break;
-          case "eth":
-            balanceData.eth = amount;
-            totalUsd += amount * ethPrice;
-            break;
-          case "sol":
-            balanceData.sol = amount;
-            totalUsd += amount * solPrice;
-            break;
-          case "usdc":
-          case "usd":
-          case "gusd":
-            balanceData.usdc += amount;
-            totalUsd += amount;
-            break;
-          default:
-            balanceData.other.push({
-              currency: balance.currency,
-              amount: amount
-            });
-        }
-      }
-    });
-
-    balanceData.totalUsd = parseFloat(totalUsd.toFixed(2));
-
-    console.log("💰 Processed balance data:", balanceData);
-
-    res.json({
-      success: true,
-      balance: balanceData,
-      message: "Successfully fetched Gemini balance"
-    });
-
-  } catch (error) {
-    console.error("❌ Gemini connection error:", error.message);
-    console.error("❌ Full error:", error.response?.data);  // ✅ ADD THIS LINE HERE   
-  
-    // Handle specific error cases
-    if (error.response) {
-      const status = error.response.status;
-      const data = error.response.data;
-      
-      if (status === 400) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid API credentials or malformed request"
-        });
-      } else if (status === 403) {
-        return res.status(403).json({
-          success: false,
-          error: "Invalid API Key or Secret. Please check your credentials."
-        });
-      } else {
-        return res.status(status).json({
-          success: false,
-          error: data.message || "Gemini API error"
-        });
-      }
-    } else if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
-      return res.status(504).json({
-        success: false,
-        error: "Connection to Gemini timed out. Please try again."
-      });
-    } else {
-      return res.status(500).json({
-        success: false,
-        error: "Failed to connect to Gemini. Please try again later."
-      });
-    }
-  }
-}); */
-
+// GEMINI BALANCES ENDPOINT
 app.post("/api/gemini/balances", async (req, res) => {
   try {
     console.log("📥 Received request body:", req.body);
     
     const { userId, env = 'live' } = req.body;
 
-    // ✅ NEW: Validate userId instead of apiKey/apiSecret
     if (!userId) {
       return res.status(400).json({ 
         success: false, 
@@ -1277,7 +940,6 @@ app.post("/api/gemini/balances", async (req, res) => {
 
     console.log("🔗 Fetching Gemini credentials for user:", userId);
 
-    // ✅ NEW: Fetch encrypted credentials from database
     const [rows] = await db.query(
       'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
       [userId]
@@ -1293,7 +955,6 @@ app.post("/api/gemini/balances", async (req, res) => {
     const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
     const storedEnv = rows[0].env || 'live';
 
-    // ✅ NEW: Decrypt the secret
     let apiSecret;
     try {
       apiSecret = decrypt(api_secret_enc, iv, auth_tag);
@@ -1307,13 +968,11 @@ app.post("/api/gemini/balances", async (req, res) => {
 
     console.log("🔗 Connecting to Gemini API for balances...", { env: env || storedEnv });
     
-    // ✅ Use decrypted credentials
     const balances = await geminiRequest(api_key, apiSecret, "/v1/balances", { env: env || storedEnv });
 
     console.log("✅ Gemini API response received");
     console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2));
 
-    // ✅ Get REAL prices from Gemini
     const [
         btcPrice, ethPrice, solPrice,
         xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
@@ -1346,7 +1005,6 @@ app.post("/api/gemini/balances", async (req, res) => {
       hntPrice, dotPrice, ftmPrice, skyPrice
     });
 
-    // Calculate total USD value and organize balances
     let totalUsd = 0;
     const balanceData = {
       btc: 0,
@@ -1480,25 +1138,12 @@ app.post("/api/gemini/balances", async (req, res) => {
   }
 });
 
-/* ----------------------------------------
-   API ENDPOINT: GET GEMINI MARKET TRADES
-   (NOW WITH WEBSOCKET BROADCAST)
------------------------------------------*/
+// GEMINI MARKET TRADES ENDPOINT
 app.get("/api/gemini/market-trades", async (req, res) => {
   try {
-    //const { symbol = 'btcusd', limit = 20 } = req.query;
     const { symbol = 'btcusd', limit = 20, env = 'live' } = req.query;
 
     console.log(`🔗 Fetching market trades for ${symbol}...`);
-
-    // Public endpoint - no authentication required
-    /*const response = await axios.get(
-      `https://api.gemini.com/v1/trades/${symbol}`,
-      {
-        params: { limit_trades: limit },
-        timeout: 10000
-      }
-    );*/
 
     const baseUrl =
       env === 'sandbox'
@@ -1513,17 +1158,14 @@ app.get("/api/gemini/market-trades", async (req, res) => {
     const trades = response.data || [];
     console.log(`✅ Fetched ${trades.length} market trades`);
 
-    // --- NEW: update cache ---
     const symbolKey = symbol.toLowerCase();
     geminiMarketTradesCache[symbolKey] = trades.slice(0, limit);
 
-    // --- NEW: broadcast to all connected clients over WebSocket ---
     io.emit('gemini_market_trades', {
       symbol: symbolKey,
       trades: geminiMarketTradesCache[symbolKey],
     });
 
-    // existing HTTP response
     res.json({
       success: true,
       trades,
@@ -1539,118 +1181,246 @@ app.get("/api/gemini/market-trades", async (req, res) => {
   }
 });
 
-/* ----------------------------------------
-   API ENDPOINT: PLACE GEMINI ORDER
------------------------------------------*/
-/*app.post("/api/gemini/order", async (req, res) => {
+// GEMINI OPEN POSITIONS ENDPOINT
+app.get('/api/gemini/open-positions', (req, res) => {
   try {
-    const { apiKey, apiSecret, symbol, side, amount, price, type = 'exchange limit' } = req.body;
+    const positions = Object.values(liveGeminiPositions);
+    return res.json({
+      success: true,
+      positions,
+    });
+  } catch (err) {
+    console.error('❌ Error getting open positions:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to get open positions',
+    });
+  }
+});
 
-    // Validate input
-    if (!apiKey || !apiSecret) {
-      return res.status(400).json({
-        success: false,
-        error: "API Key and API Secret are required"
-      });
-    }
+// GEMINI CLOSE ALL POSITIONS ENDPOINT
+app.post('/api/gemini/close-all', async (req, res) => {
+  try {
+    const { apiKey, apiSecret, env = 'live', modelId, userId } = req.body || {};
 
-    if (!symbol || !side || !amount) {
-      return res.status(400).json({
-        success: false,
-        error: "Symbol, side (buy/sell), and amount are required"
-      });
-    }
+    let finalApiKey = apiKey;
+    let finalApiSecret = apiSecret;
+    let finalEnv = env;
 
-    // Validate side
-    if (side !== 'buy' && side !== 'sell') {
-      return res.status(400).json({
-        success: false,
-        error: "Side must be 'buy' or 'sell'"
-      });
-    }
+    if ((!finalApiKey || !finalApiSecret) && userId) {
+      console.log('🔐 /api/gemini/close-all using userId credentials lookup:', userId);
 
-    // Validate amount
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: "Amount must be a positive number"
-      });
-    }
+      const [rows] = await db.query(
+        'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+        [userId]
+      );
 
-    // Validate price for limit orders
-    if (type.includes('limit')) {
-      const priceNum = parseFloat(price);
-      if (!price || isNaN(priceNum) || priceNum <= 0) {
-        return res.status(400).json({
+      if (!rows.length) {
+        return res.status(401).json({
           success: false,
-          error: "Price is required for limit orders and must be a positive number"
+          error: 'No Gemini credentials found for this user. Please connect Gemini first.',
+          reason: 'no_credentials',
+        });
+      }
+
+      const { api_key, api_secret_enc, iv, auth_tag } = rows[0];
+      const storedEnv = rows[0].env || 'live';
+
+      let decryptedSecret;
+      try {
+        decryptedSecret = decrypt(api_secret_enc, iv, auth_tag);
+      } catch (e) {
+        console.error('❌ Failed to decrypt API secret:', e);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to decrypt Gemini credentials. Please reconnect Gemini.',
+          reason: 'decrypt_failed',
+        });
+      }
+
+      finalApiKey = api_key;
+      finalApiSecret = decryptedSecret;
+      finalEnv = finalEnv || storedEnv;
+
+      console.log('✅ Credentials loaded from database for user:', userId);
+    }
+
+    if (!finalApiKey || !finalApiSecret) {
+      return res.status(400).json({
+        success: false,
+        error: 'API Key and API Secret are required',
+        reason: 'missing_credentials',
+      });
+    }
+
+    const allPositions = Object.values(liveGeminiPositions);
+    const positionsToClose = modelId
+      ? allPositions.filter(p => p.modelId === modelId)
+      : allPositions;
+
+    if (!positionsToClose.length) {
+      return res.status(400).json({
+        success: false,
+        error: modelId
+          ? `No open positions found for model ${modelId}`
+          : 'No open positions found',
+        reason: 'no_open_positions',
+      });
+    }
+
+    const results = [];
+    const errors = [];
+
+    for (const pos of positionsToClose) {
+      try {
+        const symbol = pos.symbol.toLowerCase();
+        const closeSide = pos.side === 'LONG' ? 'sell' : 'buy';
+
+        const t = await getGeminiTicker(symbol, finalEnv);
+
+        const isSell = closeSide === 'sell';
+        const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
+
+        if (!basePx || basePx <= 0) {
+          throw new Error(`No valid ticker price for ${symbol} (${finalEnv})`);
+        }
+
+        const px = isSell ? basePx * 0.97 : basePx * 1.03;
+
+        const orderPayload = {
+          symbol,
+          amount: String(pos.amount),
+          side: closeSide,
+          type: 'exchange limit',
+          price: toUsdPrice2(px),
+          options: ['immediate-or-cancel'],
+          env: finalEnv,
+          account: 'primary',
+        };
+
+        console.log(
+          `🔻 Closing ${pos.modelName} ${symbol.toUpperCase()} ${pos.side} (${closeSide.toUpperCase()}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask})`
+        );
+
+        const order = await geminiRequest(finalApiKey, finalApiSecret, '/v1/order/new', orderPayload);
+
+        const executed = parseFloat(order.executed_amount || '0');
+        const isLive = !!order.is_live;
+
+        if (isLive || executed <= 0) {
+          errors.push({
+            modelId: pos.modelId,
+            modelName: pos.modelName,
+            symbol: symbol.toUpperCase(),
+            error: `Close order not filled yet (is_live=${isLive}, executed=${executed})`,
+            reason: 'not_filled',
+            details: {
+              order_id: order.order_id,
+              is_live: order.is_live,
+              executed_amount: order.executed_amount,
+              remaining_amount: order.remaining_amount,
+            },
+          });
+          continue;
+        }
+
+        const exitPrice = parseFloat(order.avg_execution_price || order.price || '0');
+
+        const closingInfo = await closeLiveGeminiPositionAndRecord({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol,
+          amount: executed,
+          exitPrice: exitPrice,
+        });
+
+        results.push({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol: symbol.toUpperCase(),
+          side: pos.side,
+          closingAction: closeSide.toUpperCase(),
+          entryPrice: closingInfo?.entryPrice,
+          exitPrice: closingInfo?.exitPrice,
+          quantity: closingInfo?.quantity,
+          pnl: closingInfo?.pnl,
+          timestamp: closingInfo?.timestamp,
+          order_id: order.order_id,
+        });
+      } catch (err) {
+        const data = err.response?.data || {};
+        errors.push({
+          modelId: pos.modelId,
+          modelName: pos.modelName,
+          symbol: String(pos.symbol || '').toUpperCase(),
+          error: data.message || data.reason || err.message || 'Failed to close position',
+          reason: data.reason || 'close_failed',
+          details: data,
         });
       }
     }
 
-    console.log(`🔗 Placing ${side} order: ${amount} ${symbol} @ $${price}...`);
-
-    // Prepare order payload
-    const orderPayload = {
-      symbol: symbol.toLowerCase(),
-      amount: amount.toString(),
-      price: price.toString(),
-      side: side.toLowerCase(),
-      type: type,
-      options: ['maker-or-cancel'] // Prevents immediate execution, safer for testing
-      // NOTE: account is added inside geminiRequest for /v1/order/new
-    };
-
-    // Call Gemini API to place order
-    const order = await geminiRequest(apiKey, apiSecret, "/v1/order/new", orderPayload);
-
-    console.log("✅ Order placed successfully:", order.order_id);
-
-    res.json({
-      success: true,
-      order: {
-        order_id: order.order_id,
-        symbol: order.symbol,
-        side: order.side,
-        type: order.type,
-        price: order.price,
-        amount: order.original_amount,
-        remaining: order.remaining_amount,
-        executed: order.executed_amount,
-        timestamp: order.timestamp
-      },
-      message: "Order placed successfully"
-    });
-
-  } catch (error) {
-    console.error("❌ Error placing order:", error.message);
-    console.error("❌ Full error:", error.response?.data || error);
-
-    if (error.response) {
-      const status = error.response.status;
-      const data = error.response.data;
-      
-      return res.status(status).json({
-        success: false,
-        error: data.message || data.reason || "Failed to place order",
-        details: data
-      });
-    } else {
+    if (!results.length) {
       return res.status(500).json({
         success: false,
-        error: error.message || "Failed to place order"
+        error: errors[0]?.error || 'Failed to close positions',
+        reason: 'all_failed',
+        results: [],
+        errors,
       });
     }
-  }
-}); */
 
+    return res.json({
+      success: true,
+      message: `Closed ${results.length} position(s)`,
+      results,
+      errors,
+    });
+  } catch (err) {
+    console.error('❌ /api/gemini/close-all error:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to close positions',
+      reason: 'server_error',
+    });
+  }
+});
+
+// GEMINI CLEAR POSITIONS ENDPOINT
+app.post('/api/gemini/clear-positions', (req, res) => {
+  try {
+    const { modelId } = req.body;
+
+    if (modelId) {
+      const keysToDelete = Object.keys(liveGeminiPositions).filter(key =>
+        key.startsWith(`${modelId}_`)
+      );
+      keysToDelete.forEach(key => delete liveGeminiPositions[key]);
+      console.log(`🧹 Cleared ${keysToDelete.length} positions for model ${modelId}`);
+    } else {
+      const count = Object.keys(liveGeminiPositions).length;
+      Object.keys(liveGeminiPositions).forEach(key => delete liveGeminiPositions[key]);
+      console.log(`🧹 Cleared all ${count} positions`);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Positions cleared from memory',
+    });
+  } catch (err) {
+    console.error('❌ Error clearing positions:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to clear positions',
+    });
+  }
+});
+
+// GEMINI ORDER ENDPOINT (WITH FIXED ORDER TYPE NORMALIZATION)
 app.post("/api/gemini/order", async (req, res) => {
   try {
-    // LOG 1: raw body
     console.log('📥 /api/gemini/order RAW body:', req.body);
 
-    // ✅ NEW: Allow placing orders using userId (fetch creds from DB) if apiKey/apiSecret not provided
     let effectiveApiKey = req.body.apiKey;
     let effectiveApiSecret = req.body.apiSecret;
     let effectiveEnv = req.body.env || 'live';
@@ -1688,32 +1458,14 @@ app.post("/api/gemini/order", async (req, res) => {
         });
       }
 
-      // ✅ Use decrypted credentials
       effectiveApiKey = api_key;
       effectiveApiSecret = decryptedSecret;
-      effectiveEnv = effectiveEnv || storedEnv;
+      effectiveEnv = req.body.env || storedEnv || 'live';
 
       console.log('✅ Credentials loaded from database for user:', userId);
     }
 
-    // Now extract all other fields
     const {
-      symbol,
-      side,
-      amount,
-      price,
-      type = 'exchange limit',
-      modelId,
-      modelName,
-      closePosition,
-    } = req.body;
-
-    const isClosing = (closePosition === true || closePosition === 'true');
-
-    // LOG 2: parsed fields
-    console.log('📥 /api/gemini/order parsed:', {
-      apiKey: effectiveApiKey ? '[provided]' : '[missing]',
-      apiSecret: effectiveApiSecret ? '[provided]' : '[missing]',
       symbol,
       side,
       amount,
@@ -1722,11 +1474,53 @@ app.post("/api/gemini/order", async (req, res) => {
       modelId,
       modelName,
       closePosition,
+    } = req.body;
+
+    const isClosing = (closePosition === true || closePosition === 'true');
+
+    const normalizeGeminiOrderType = (requestedType, orderSide) => {
+      const t = (requestedType ?? '').toString().toLowerCase().trim();
+      const s = (orderSide ?? '').toString().toLowerCase().trim();
+
+      if (!['buy', 'sell'].includes(s)) {
+        throw new Error(`Invalid side: ${orderSide}`);
+      }
+
+      if (
+        t === 'exchange market' ||
+        t === 'market' ||
+        t === 'market buy' ||
+        t === 'market sell' ||
+        t.includes('market')
+      ) {
+        return s === 'buy' ? 'market buy' : 'market sell';
+      }
+
+      if (!t || t === 'exchange limit' || t === 'limit' || t.includes('limit')) {
+        return 'exchange limit';
+      }
+
+      throw new Error(`Invalid/unsupported order type requested: ${requestedType}`);
+    };
+
+    const normalizedOpenType = !isClosing ? normalizeGeminiOrderType(type, side) : null;
+
+    console.log('📥 /api/gemini/order parsed:', {
+      apiKey: effectiveApiKey ? '[provided]' : '[missing]',
+      apiSecret: effectiveApiSecret ? '[provided]' : '[missing]',
+      symbol,
+      side,
+      amount,
+      price,
+      typeRaw: type,
+      typeNormalized: normalizedOpenType,
+      modelId,
+      modelName,
+      closePosition,
       isClosing,
       env: effectiveEnv,
     });
 
-    // Validate input
     if (!effectiveApiKey || !effectiveApiSecret) {
       console.error('❌ Validation failed: Missing API credentials');
       return res.status(400).json({
@@ -1743,7 +1537,6 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // Validate side
     if (!['buy', 'sell'].includes(side.toLowerCase())) {
       console.error('❌ Validation failed: Invalid side', { side });
       return res.status(400).json({
@@ -1752,7 +1545,6 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // Validate amount
     const amountNum = parseFloat(amount);
     if (isNaN(amountNum) || amountNum <= 0) {
       console.error('❌ Validation failed: Invalid amount', { amount, amountNum });
@@ -1762,7 +1554,6 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // ✅ NEW: Check if model already has an open position for this symbol (when NOT closing)
     if (!isClosing && modelId && hasOpenPosition(modelId, symbol)) {
       const existingPos = liveGeminiPositions[livePosKey(modelId, symbol)];
       console.warn(`⚠️ ${modelName} already has an open ${existingPos.side} position for ${symbol.toUpperCase()}`);
@@ -1776,7 +1567,6 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // ✅ Check minimum order size BEFORE calling Gemini
     console.log('🔍 Validating order amount:', { symbol, amount });
     const validation = validateOrderAmount(symbol, amount);
     console.log('🔍 Validation result:', validation);
@@ -1795,8 +1585,7 @@ app.post("/api/gemini/order", async (req, res) => {
       });
     }
 
-    // ✅ Validate price for limit orders (ONLY when opening)
-    if (!isClosing && type.includes('limit')) {
+    if (!isClosing && normalizedOpenType === 'exchange limit') {
       const priceNum = parseFloat(price);
       if (!price || isNaN(priceNum) || priceNum <= 0) {
         console.error('❌ Validation failed: Invalid price for limit order', { price, priceNum });
@@ -1808,63 +1597,53 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     console.log(
-      `🔗 [${effectiveEnv.toUpperCase()}] Placing ${side} order: ${amount} ${symbol} @ $${price} (model: ${
-        modelName || 'N/A'
-      }, close=${isClosing})`
+      `🔗 [${effectiveEnv.toUpperCase()}] Placing ${side} order: ${amount} ${symbol}` +
+      (price ? ` @ $${price}` : '') +
+      ` (model: ${modelName || 'N/A'}, close=${isClosing})`
     );
 
-    // ✅ Prepare order payload (Gemini fields)
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: amount.toString(),
       side: side.toLowerCase(),
     };
 
-    // ✅ CLOSING: Use IOC LIMIT to simulate market (Gemini rejects exchange market for you)
     if (isClosing) {
       const t = await getGeminiTicker(symbol, effectiveEnv);
 
-      const isSell = side.toLowerCase() === 'sell'; // sell closes LONG, buy closes SHORT
+      const isSell = side.toLowerCase() === 'sell';
       const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
 
       if (!basePx || basePx <= 0) {
         throw new Error(`No valid ticker price for ${symbol} (${effectiveEnv})`);
       }
 
-      // Nudge price so it fills immediately like a market order:
-      // SELL => below bid; BUY => above ask.
       const px = isSell ? basePx * 0.97 : basePx * 1.03;
 
       orderPayload.type = 'exchange limit';
       orderPayload.price = toUsdPrice2(px);
-
-      // ✅ IOC ONLY when closing
       orderPayload.options = ['immediate-or-cancel'];
 
       console.log(
         `🔻 Using IOC LIMIT to close position (${isSell ? 'SELL' : 'BUY'}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask}, last=${t.last})`
       );
     } else {
-      // ✅ OPENING: Use limit order WITHOUT IOC (prevents "IOC canceled" emails on opens)
-      orderPayload.type = type || 'exchange limit';
+      orderPayload.type = normalizedOpenType;
 
-      if (orderPayload.type.includes('limit')) {
+      if (orderPayload.type === 'exchange limit') {
         const numericPrice = Number(price);
-
         if (!numericPrice || numericPrice <= 0) {
           throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
         }
-
         orderPayload.price = numericPrice.toString();
-
-        // ❌ IMPORTANT: do NOT set orderPayload.options = ['immediate-or-cancel'] here
-        console.log(`🔺 Using LIMIT order to open position (NO IOC) (price: ${numericPrice})`);
+        console.log(`🔺 Using LIMIT order to open position (price: ${numericPrice})`);
+      } else {
+        console.log(`🔺 Using MARKET order to open position (${orderPayload.type})`);
       }
     }
 
     console.log('📤 Sending to Gemini:', orderPayload);
 
-    // Call Gemini API to place order (using effective credentials)
     const order = await geminiRequest(effectiveApiKey, effectiveApiSecret, "/v1/order/new", {
       ...orderPayload,
       env: effectiveEnv,
@@ -1878,9 +1657,6 @@ app.post("/api/gemini/order", async (req, res) => {
       is_live: order.is_live,
     });
 
-    // ====== POSITION OPEN / CLOSE LOGIC ======
-
-    // ✅ When we BUY and NOT closing => open LONG position
     if (side.toLowerCase() === 'buy' && !isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
@@ -1911,7 +1687,6 @@ app.post("/api/gemini/order", async (req, res) => {
       }
     }
 
-    // ✅ When we SELL and NOT closing => open SHORT position
     if (side.toLowerCase() === 'sell' && !isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
       const isLive = !!order.is_live;
@@ -1942,7 +1717,6 @@ app.post("/api/gemini/order", async (req, res) => {
       }
     }
 
-    // ✅ When closing => close live position + log P&L
     let closingInfo = null;
     if (isClosing && modelId && modelName) {
       const executed = parseFloat(order.executed_amount || '0');
@@ -1981,9 +1755,6 @@ app.post("/api/gemini/order", async (req, res) => {
       }
     }
 
-    // ====== END POSITION OPEN / CLOSE LOGIC ======
-
-    // ✅ Return detailed order response
     res.json({
       success: true,
       order: {
@@ -2047,95 +1818,35 @@ app.post("/api/gemini/order", async (req, res) => {
   }
 });
 
-  /*   console.log("✅ [LIVE] Order placed on Gemini:", order.order_id);
+// ========================================
+// 3. SOCKET.IO CONNECTION HANDLING
+// ========================================
+io.on("connection", socket => {
+  console.log("✅ Client connected:", socket.id);
 
-    // When we BUY and the order is linked to a model => open live position
-    if (side.toLowerCase() === 'buy' && modelId && modelName) {
-      openLiveGeminiPosition({
-        modelId,
-        modelName,
-        symbol,
-        amount,
-        price,
-      });
-    }
-
-    // When we SELL with closePosition=true => close live position + log P&L
-    let closingInfo = null;
-    if (side.toLowerCase() === 'sell' && closePosition && modelId && modelName) {
-      closingInfo = await closeLiveGeminiPositionAndRecord({
-        modelId,
-        modelName,
-        symbol,
-        amount,
-        exitPrice: price,
-      });
-    }
-
-    res.json({
-      success: true,
-      order: {
-        order_id: order.order_id,
-        symbol: order.symbol,
-        side: order.side,
-        type: order.type,
-        price: order.price,
-        amount: order.original_amount,
-        remaining: order.remaining_amount,
-        executed: order.executed_amount,
-        timestamp: order.timestamp
-      },
-      positionClose: closingInfo,
-      message: "Order placed successfully"
-    });
-
-  } catch (error) {
-    console.error("❌ [LIVE] Error placing Gemini order:", error.message);
-    console.error("❌ [LIVE] Full error:", error.response?.data || error);
-
-    if (error.response) {
-      const status = error.response.status;
-      const data = error.response.data;
-      
-      return res.status(status).json({
-        success: false,
-        error: data.message || data.reason || "Failed to place order",
-        details: data
-      });
-    } else {
-      return res.status(500).json({
-        success: false,
-        error: error.message || "Failed to place order"
-      });
-    }
-  }
-});*/
-
-/* ----------------------------------------
-   SEND SNAPSHOT ON CONNECT
------------------------------------------*/
-//io.on("connection", socket => {
-  io.on("connection", socket => {
-  console.log("Client connected:", socket.id);
-
-  // ✅ NEW: Track this socket
   socketsById.set(socket.id, socket);
 
-  // ✅ NEW: Join user-specific room
   socket.on('join_user_room', (userId) => {
-    if (userId) {
-      socket.join(userId);
-      console.log(`✅ User ${userId} joined their private room (socket: ${socket.id})`);
+    if (!userId) {
+      console.error('❌ join_user_room called without userId');
+      return;
     }
+
+    socket.join(`user:${userId}`);
+    
+    if (!userSockets.has(userId)) {
+      userSockets.set(userId, new Set());
+    }
+    userSockets.get(userId).add(socket.id);
+
+    console.log(`✅ Socket ${socket.id} joined room user:${userId}`);
+    console.log(`📊 User ${userId} now has ${userSockets.get(userId).size} connected socket(s)`);
   });
 
-   console.log("Client connected:", socket.id);
-
   socket.on('request_clear_logs', (userId) => {
-    io.to(userId).emit('clear_session_logs');
-  }); 
+    io.to(`user:${userId}`).emit('clear_session_logs');
+  });
 
-  // Send models snapshot
   const modelsSnapshot = MODELS.map(m => ({
     id: m.id,
     name: m.name,
@@ -2146,7 +1857,6 @@ app.post("/api/gemini/order", async (req, res) => {
 
   socket.emit("models_snapshot", modelsSnapshot);
 
-  // Send crypto prices snapshot
   const cryptoSnapshot = {
     latest: cryptoPrices,
     history: cryptoHistory,
@@ -2155,7 +1865,6 @@ app.post("/api/gemini/order", async (req, res) => {
 
   socket.emit("crypto_snapshot", cryptoSnapshot);
 
-  // ✅ Send last known Gemini trades snapshot for ALL symbols
   ['btcusd', 'ethusd', 'solusd'].forEach(symbol => {
     const trades = geminiMarketTradesCache[symbol] || [];
     if (trades.length > 0) {
@@ -2166,7 +1875,6 @@ app.post("/api/gemini/order", async (req, res) => {
     }
   });
 
-  // Handle update speed changes from client
   socket.on("setUpdateSpeed", (newSpeed) => {
     console.log(`Update speed changed to: ${newSpeed}ms`);
     UPDATE_INTERVAL = newSpeed;
@@ -2174,22 +1882,33 @@ app.post("/api/gemini/order", async (req, res) => {
   });
 
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-    // ✅ NEW: Remove socket from tracking
+    console.log("❌ Socket disconnected:", socket.id);
+    
     socketsById.delete(socket.id);
+    
+    for (const [userId, sockets] of userSockets.entries()) {
+      if (sockets.has(socket.id)) {
+        sockets.delete(socket.id);
+        console.log(`📊 User ${userId} now has ${sockets.size} connected socket(s)`);
+        
+        if (sockets.size === 0) {
+          userSockets.delete(userId);
+          console.log(`🗑️ User ${userId} has no more connected sockets`);
+        }
+        break;
+      }
+    }
   });
 });
 
-/* ----------------------------------------
-   START SERVER
------------------------------------------*/
+// ========================================
+// 4. START SERVER
+// ========================================
 async function startServer() {
   await initDatabase();
   
-  // Start the update intervals
   startUpdateInterval();
-  //startTradeGeneration();
-  startGeminiTradesPolling(); // NEW: auto-poll Gemini trades every 5s
+  startGeminiTradesPolling();
 
   server.listen(3001, () => {
     console.log("🚀 Backend running on port 3001");
