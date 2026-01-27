@@ -645,14 +645,53 @@ function startGeminiTradesPolling() {
 // 2. API ROUTES (BEFORE STATIC FILES)
 // ========================================
 
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: "Missing token" });
+    }
+
+    // Verify token with Google
+    const response = await axios.get(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`,
+      { timeout: 8000 }
+    );
+
+    // tokeninfo returns fields like: sub, email, name, picture, aud, iss, exp, etc.
+    return res.json({
+      success: true,
+      user: {
+        sub: response.data.sub,
+        email: response.data.email,
+        name: response.data.name,
+        picture: response.data.picture,
+      },
+    });
+  } catch (error) {
+    const data = error.response?.data;
+    console.error("❌ Google token verification failed:", data || error.message);
+
+    return res.status(401).json({
+      success: false,
+      error: "Invalid token",
+      details: data || error.message,
+    });
+  }
+}); 
+
 // APP STATE ENDPOINTS
 app.get('/api/app-state', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
 
-    const [rows] = await db.query('SELECT state_json, version FROM user_app_state WHERE user_id = ?', [userId]);
-    
+    const [rows] = await db.query(
+      'SELECT state_json, version FROM user_app_state WHERE user_id = ?',
+      [userId]
+    );
+
     if (!rows.length) {
       const defaultState = {
         selectedModels: [],
@@ -670,7 +709,33 @@ app.get('/api/app-state', async (req, res) => {
       return res.json({ success: true, state: defaultState, version: 0 });
     }
 
-    return res.json({ success: true, state: rows[0].state_json, version: rows[0].version });
+    // ✅ FIX: state_json is stored as a JSON string, parse it before returning
+    let parsedState;
+    try {
+      parsedState = JSON.parse(rows[0].state_json);
+    } catch (e) {
+      console.error(`❌ Failed to parse state_json for user ${userId}`, e);
+      parsedState = null;
+    }
+
+    if (!parsedState || typeof parsedState !== 'object') {
+      // fallback to default so UI doesn't get nuked
+      parsedState = {
+        selectedModels: [],
+        startingValue: "100",
+        stopLoss: "",
+        profitTarget: "",
+        isTrading: false,
+        tradingStopped: false,
+        stopReason: "",
+        finalProfitLoss: null,
+        initialValues: {},
+        updateSpeed: "1500",
+        isMockTrading: true
+      };
+    }
+
+    return res.json({ success: true, state: parsedState, version: rows[0].version });
   } catch (err) {
     console.error('❌ Error fetching app state:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch app state' });
@@ -680,22 +745,48 @@ app.get('/api/app-state', async (req, res) => {
 app.put('/api/app-state', async (req, res) => {
   try {
     const { userId, state, socketId, version } = req.body;
-    
-    if (!userId || !state) {
+
+    if (!userId || state == null) {
       return res.status(400).json({ success: false, error: 'Missing userId or state' });
+    }
+
+    // ✅ FIX 2: Ensure state is an object (not a JSON string)
+    let finalState = state;
+    if (typeof finalState === 'string') {
+      try {
+        finalState = JSON.parse(finalState);
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: 'state must be a valid JSON object (received string but failed to parse)',
+        });
+      }
+    }
+
+    // Optional hard guard: if it’s still not an object, reject
+    if (typeof finalState !== 'object' || Array.isArray(finalState)) {
+      return res.status(400).json({
+        success: false,
+        error: 'state must be an object',
+      });
     }
 
     const clientVersion = version || 0;
 
-    const [rows] = await db.query('SELECT version FROM user_app_state WHERE user_id = ?', [userId]);
-    
+    const [rows] = await db.query(
+      'SELECT version FROM user_app_state WHERE user_id = ?',
+      [userId]
+    );
+
     let currentVersion = 0;
     if (rows.length > 0) {
       currentVersion = rows[0].version;
     }
 
     if (clientVersion < currentVersion) {
-      console.warn(`⚠️ Stale state update rejected for user ${userId} (client v${clientVersion}, server v${currentVersion})`);
+      console.warn(
+        `⚠️ Stale state update rejected for user ${userId} (client v${clientVersion}, server v${currentVersion})`
+      );
       return res.status(409).json({
         success: false,
         error: 'Stale state version',
@@ -707,27 +798,27 @@ app.put('/api/app-state', async (req, res) => {
 
     await db.query(
       'INSERT INTO user_app_state (user_id, state_json, version) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE state_json = ?, version = ?',
-      [userId, JSON.stringify(state), newVersion, JSON.stringify(state), newVersion]
+      [userId, JSON.stringify(finalState), newVersion, JSON.stringify(finalState), newVersion]
     );
 
     if (socketId && socketsById.has(socketId)) {
       const senderSocket = socketsById.get(socketId);
-      senderSocket.to(`user:${userId}`).emit('app_state_sync', { state, version: newVersion });
+      senderSocket.to(`user:${userId}`).emit('app_state_sync', { state: finalState, version: newVersion });
     } else {
-      io.to(`user:${userId}`).emit('app_state_sync', { state, version: newVersion });
+      io.to(`user:${userId}`).emit('app_state_sync', { state: finalState, version: newVersion });
     }
 
-    if (state.isTrading && state.initialValues) {
-      const startValue = parseFloat(state.startingValue) || 100;
-      
+    if (finalState.isTrading && finalState.initialValues) {
+      const startValue = parseFloat(finalState.startingValue) || 100;
+
       console.log(`🚀 Trading started for user ${userId}. Resetting all models to $${startValue}`);
-      
+
       io.to(`user:${userId}`).emit('models_reset', {
-        initialValues: state.initialValues,
+        initialValues: finalState.initialValues,
         startingValue: startValue,
-        sessionId: state.tradingSession?.sessionId,
-        startTime: state.tradingSession?.startTime,
-        entryPrices: state.tradingSession?.entryPrices || {}
+        sessionId: finalState.tradingSession?.sessionId,
+        startTime: finalState.tradingSession?.startTime,
+        entryPrices: finalState.tradingSession?.entryPrices || {}
       });
     }
 
@@ -799,31 +890,46 @@ app.post('/api/trading-session', async (req, res) => {
 });
 
 // LOGS ARCHIVE ENDPOINTS
-app.get('/api/logs/archive', async (req, res) => {
-  const { userId, sessionId } = req.query;
-
-  if (!userId) {
-    return res.status(400).json({ success: false, error: 'Missing userId' });
-  }
-
+app.post('/api/logs/archive', async (req, res) => {
   try {
-    let query = 'SELECT * FROM trade_logs_archive WHERE user_id = ?';
-    const params = [userId];
-
-    if (sessionId) {
-      query += ' AND session_id = ?';
-      params.push(sessionId);
+    const { userId, sessionId, message, type, metadata } = req.body;
+    
+    // ✅ Add validation
+    if (!userId) {
+      console.warn('⚠️ Log archive called without userId, skipping');
+      return res.status(400).json({ success: false, error: 'Missing userId' });
     }
 
-    query += ' ORDER BY timestamp ASC';
+    if (!message) {
+      console.warn('⚠️ Log archive called without message, skipping');
+      return res.status(400).json({ success: false, error: 'Missing message' });
+    }
 
-    const [rows] = await db.query(query, params);
+    const metadataJson = JSON.stringify(metadata || {});
 
-    console.log(`✅ Fetched ${rows.length} archived logs for user ${userId}`);
-    res.json({ success: true, logs: rows });
-  } catch (error) {
-    console.error('❌ Error fetching archived logs:', error);
-    res.status(500).json({ success: false, error: error.message });
+    // ✅ Check if db exists
+    if (!db) {
+      console.error('❌ Database not initialized');
+      return res.status(500).json({ success: false, error: 'Database not ready' });
+    }
+
+    await db.query(
+      'INSERT INTO trade_logs_archive (user_id, session_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, ?, NOW())',
+      [userId, sessionId || null, message, type || 'info', metadataJson]
+    );
+
+    console.log(`✅ Archived log for user ${userId}: ${message}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Archiving error:', err.message);
+    console.error('❌ Full error:', err);
+    
+    // Don't crash - just log and return error
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to archive log',
+      details: err.message 
+    });
   }
 });
 
