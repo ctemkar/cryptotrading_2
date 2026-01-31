@@ -1,6 +1,7 @@
 // frontend/hooks/useGemini.js
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import socket from '../services/socket'; // ✅ Import socket
 
 // ========================================
 // ✅ STANDALONE EXPORT: fetchGeminiBalances
@@ -17,8 +18,8 @@ export const fetchGeminiBalances = async (userId) => {
     const response = await axios.post(
       '/api/gemini/balances',
       { userId, env: 'live' },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
+      { headers: { 'Content-Type': 'application/json' }
+    });
 
     if (response.data.success) {
       console.log('✅ Balances fetched successfully');
@@ -37,35 +38,23 @@ export const fetchGeminiBalances = async (userId) => {
 // ✅ MAIN HOOK: useGemini
 // ========================================
 export function useGemini() {
-  // ✅ State: no localStorage initialization (server is source of truth)
   const [balances, setBalances] = useState({});
-  const [marketTrades, setMarketTrades] = useState({}); // { btcusd: [...], ethusd: [...], solusd: [...] }
+  const [marketTrades, setMarketTrades] = useState({});
   const [openPositions, setOpenPositions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-
-  // ✅ connectedUserId: defaults to empty string (no localStorage init)
   const [connectedUserId, setConnectedUserId] = useState('');
-
-  // ✅ Default symbols to trade
   const DEFAULT_SYMBOLS = ['btcusd', 'ethusd', 'solusd'];
 
-  // ========================================
-  // FETCH BALANCES (uses userId) - Internal version
-  // ========================================
   const fetchBalances = async (userId) => {
     const effectiveUserId = userId || connectedUserId;
-
     if (!effectiveUserId) {
       console.error('❌ No userId available for fetching balances');
       setIsConnected(false);
       return { success: false, error: 'Missing userId for Gemini balances' };
     }
-
-    // Use the standalone function
     const result = await fetchGeminiBalances(effectiveUserId);
-
     if (result.success) {
       setBalances(result.data);
       setIsConnected(true);
@@ -73,23 +62,17 @@ export function useGemini() {
       setError(result.error);
       setIsConnected(false);
     }
-
     return result;
   };
 
-  // ========================================
-  // FETCH MARKET TRADES (public endpoint)
-  // ========================================
   const fetchMarketTrades = async (symbols = DEFAULT_SYMBOLS, limit = 20) => {
     try {
       const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
       const tradesData = {};
-
       const promises = symbolArray.map(async (symbol) => {
         const response = await axios.get('/api/gemini/market-trades', {
           params: { symbol, limit, env: 'live' },
         });
-
         if (response.data.success) {
           tradesData[symbol] = response.data.trades;
         } else {
@@ -97,7 +80,6 @@ export function useGemini() {
           tradesData[symbol] = [];
         }
       });
-
       await Promise.all(promises);
       setMarketTrades(tradesData);
       return { success: true, data: tradesData };
@@ -109,50 +91,36 @@ export function useGemini() {
     }
   };
 
-  // ========================================
-  // FETCH OPEN POSITIONS
-  // ========================================
   const fetchOpenPositions = async (userId) => {
-  try {
-    const effectiveUserId = userId || connectedUserId;
-
-    // 🔒 If you want DB-backed per-user positions, don't allow calls without userId
-    if (!effectiveUserId) {
-      console.warn('⚠️ fetchOpenPositions called without userId; skipping');
-      setOpenPositions([]);
-      return { success: false, error: 'Missing userId for fetching open positions' };
+    try {
+      const effectiveUserId = userId || connectedUserId;
+      if (!effectiveUserId) {
+        console.warn('⚠️ fetchOpenPositions called without userId; skipping');
+        setOpenPositions([]);
+        return { success: false, error: 'Missing userId for fetching open positions' };
+      }
+      const response = await axios.get('/api/gemini/open-positions', {
+        params: { userId: effectiveUserId },
+      });
+      if (response.data.success) {
+        const positions = response.data.positions || [];
+        setOpenPositions(positions);
+        return { success: true, data: positions };
+      }
+      throw new Error(response.data.error || 'Failed to fetch open positions');
+    } catch (err) {
+      console.error('❌ Error fetching open positions:', err);
+      const msg = err.response?.data?.error || err.message || 'Failed to fetch open positions';
+      return { success: false, error: msg };
     }
+  };
 
-    const response = await axios.get('/api/gemini/open-positions', {
-      params: { userId: effectiveUserId },
-    });
-
-    if (response.data.success) {
-      const positions = response.data.positions || [];
-      setOpenPositions(positions);
-      return { success: true, data: positions };
-    }
-
-    throw new Error(response.data.error || 'Failed to fetch open positions');
-  } catch (err) {
-    console.error('❌ Error fetching open positions:', err);
-    const msg = err.response?.data?.error || err.message || 'Failed to fetch open positions';
-    return { success: false, error: msg };
-  }
-};
-
-  // ========================================
-  // PLACE ORDER (uses userId)
-  // ========================================
   const placeOrder = async (orderData) => {
     try {
       setLoading(true);
       setError(null);
-
       console.log('📤 placeOrder called with:', orderData);
-
       const effectiveUserId = orderData.userId || connectedUserId;
-
       if (!effectiveUserId) {
         console.error('❌ No userId available for placing order');
         return {
@@ -161,29 +129,21 @@ export function useGemini() {
           reason: 'no_user_id',
         };
       }
-
       const payload = {
         userId: effectiveUserId,
         env: 'live',
         ...orderData,
       };
-
       console.log('📦 POST /api/gemini/order payload:', {
         ...payload,
         userId: '[provided]',
       });
-
       const response = await axios.post('/api/gemini/order', payload);
-
       console.log('✅ Gemini order response:', response.data);
-
       if (response.data.success) {
         console.log('✅ Gemini order placed successfully:', response.data.order);
-
-        // Refresh balances and positions after successful order
         await fetchBalances(effectiveUserId);
         await fetchOpenPositions(effectiveUserId);
-
         return {
           success: true,
           order: response.data.order,
@@ -215,16 +175,11 @@ export function useGemini() {
     }
   };
 
-  // ========================================
-  // CLOSE ALL POSITIONS (uses userId)
-  // ========================================
   const closeAllPositions = async (modelId = null) => {
     try {
       setLoading(true);
       setError(null);
-
       console.log('🛑 Closing all Gemini positions...', { modelId });
-
       if (!connectedUserId) {
         console.error('❌ No userId available for closing positions');
         return {
@@ -233,19 +188,15 @@ export function useGemini() {
           reason: 'no_user_id',
         };
       }
-
       const response = await axios.post('/api/gemini/close-all', {
         userId: connectedUserId,
         env: 'live',
         modelId,
       });
-
       if (response.data.success) {
         console.log('✅ Close all positions result:', response.data);
-
         await fetchBalances(connectedUserId);
         await fetchOpenPositions(connectedUserId);
-
         return {
           success: true,
           results: response.data.results || [],
@@ -269,13 +220,9 @@ export function useGemini() {
     }
   };
 
-  // ========================================
-  // CLEAR POSITIONS (for reset)
-  // ========================================
   const clearPositions = async (modelId = null) => {
     try {
       const response = await axios.post('/api/gemini/clear-positions', { modelId });
-
       if (response.data.success) {
         console.log('✅ Positions cleared from backend');
         await fetchOpenPositions(connectedUserId);
@@ -292,24 +239,17 @@ export function useGemini() {
     }
   };
 
-  // ========================================
-  // CONNECT (save userId and fetch initial data)
-  // ========================================
   const connect = async (userId) => {
     setLoading(true);
     setError(null);
-
     if (!userId) {
       console.error('❌ connect() called without userId');
       setLoading(false);
       return { success: false, error: 'Missing userId' };
     }
-
     setConnectedUserId(userId);
     console.log('🔗 Connecting to Gemini with userId:', userId);
-
     const result = await fetchBalances(userId);
-
     if (result.success) {
       await fetchMarketTrades(DEFAULT_SYMBOLS);
       await fetchOpenPositions(userId);
@@ -318,14 +258,10 @@ export function useGemini() {
       setConnectedUserId('');
       console.error('❌ Failed to connect to Gemini:', result.error);
     }
-
     setLoading(false);
     return result;
   };
 
-  // ========================================
-  // DISCONNECT
-  // ========================================
   const disconnect = () => {
     setIsConnected(false);
     setConnectedUserId('');
@@ -333,7 +269,6 @@ export function useGemini() {
     setMarketTrades({});
     setOpenPositions([]);
     setError(null);
-
     console.log('✅ Disconnected from Gemini');
   };
 
@@ -343,46 +278,32 @@ export function useGemini() {
   useEffect(() => {
     const checkConnectionStatus = async () => {
       try {
-        // Get userId from localStorage (assuming it's stored after Google login)
         const savedUser = localStorage.getItem('googleUser');
         if (!savedUser) {
           console.log('ℹ️ No saved user found in localStorage');
           return;
         }
-
         const user = JSON.parse(savedUser);
         const userId = user.sub;
-
         if (!userId) {
           console.log('ℹ️ No userId found in saved user');
           return;
         }
-
         console.log('🔍 Checking Gemini connection status for userId:', userId);
-
-        // Check if user has Gemini credentials
         const credRes = await axios.get('/api/gemini/credentials/status', {
           params: { userId }
         });
-
         if (!credRes.data.success || !credRes.data.hasCredentials) {
           console.log('ℹ️ No Gemini credentials found for this user');
           return;
         }
-
         console.log('✅ User has Gemini credentials saved');
-
-        // Check if user is connected
         const statusRes = await axios.get('/api/gemini/connection-status', {
           params: { userId }
         });
-
         if (statusRes.data.success && statusRes.data.isConnected) {
           console.log('✅ User was previously connected to Gemini - auto-connecting...');
-          
-          // Auto-connect using userId
           const result = await connect(userId);
-          
           if (result.success) {
             console.log('✅ Auto-connected to Gemini successfully');
           } else {
@@ -395,41 +316,41 @@ export function useGemini() {
         console.error('❌ Failed to check connection status:', err);
       }
     };
-
     checkConnectionStatus();
-  }, []); // Run once on mount
+  }, []);
 
   // ========================================
-  // POLLING: Open positions every 5s
-  // ========================================
-  useEffect(() => {
-    if (!isConnected || !connectedUserId) return;
-
-    const interval = setInterval(() => {
-      fetchOpenPositions(connectedUserId);
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [isConnected, connectedUserId]);
-
-  // ========================================
-  // POLLING: Market trades every 10s
+  // ✅ NEW: SOCKET LISTENERS (REPLACES POLLING)
   // ========================================
   useEffect(() => {
-    if (!isConnected) return;
+    if (!connectedUserId) return;
 
-    const interval = setInterval(() => {
-      fetchMarketTrades(DEFAULT_SYMBOLS);
-    }, 10000);
+    // Join the user's private room
+    socket.emit("join_user_room", connectedUserId);
 
-    return () => clearInterval(interval);
-  }, [isConnected]);
+    const handlePositionOpened = (pos) => {
+      console.log("🟢 Position opened (from socket):", pos);
+      setOpenPositions(prev => [...prev, pos]);
+    };
 
-  // ========================================
-  // RETURN API
-  // ========================================
+    const handlePositionClosed = (data) => {
+      console.log("🔴 Position closed (from socket):", data);
+      setOpenPositions(prev => prev.filter(p => 
+        !(p.modelId === data.model_id && p.symbol.toLowerCase() === data.symbol.toLowerCase())
+      ));
+    };
+
+    socket.on('position_opened', handlePositionOpened);
+    socket.on('position_closed', handlePositionClosed);
+
+    return () => {
+      socket.off('position_opened', handlePositionOpened);
+      socket.off('position_closed', handlePositionClosed);
+    };
+  }, [connectedUserId]);
+
+  // Return API
   return {
-    // State
     balances,
     marketTrades,
     openPositions,
@@ -438,15 +359,13 @@ export function useGemini() {
     isConnected,
     connectedUserId,
     DEFAULT_SYMBOLS,
-
-    // Functions
     connect,
     disconnect,
     fetchBalances,
     fetchMarketTrades,
     fetchOpenPositions,
     placeOrder,
-    placeGeminiOrder: placeOrder, // alias
+    placeGeminiOrder: placeOrder,
     closeAllPositions,
     clearPositions,
     setError,

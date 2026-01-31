@@ -817,109 +817,47 @@ useEffect(() => {
 }, [socket]);
 
 // ✅ CONSOLIDATED: Room Join + State Hydration
+// ✅ BULLETPROOF ROOM JOINING
+// ✅ AGGRESSIVE ROOM JOINING (Add this to Dashboard.jsx)
 useEffect(() => {
-  if (!userInfo?.sub || !socket) return;
+  if (!socket || !userInfo?.sub) return;
 
-  let cancelled = false;
+  let joinInterval;
 
-  const joinRoom = () => {
-    console.log('📡 Attempting to join socket room for user:', userInfo.sub);
-    socket.emit('join_user_room', userInfo.sub);
-  };
-
-  if (socket.connected) {
-    joinRoom();
-  }
-
-  socket.on('connect', joinRoom);
-
-  const handleReconnect = () => {
-    console.log('🔄 Re-joining room after reconnect');
-    joinRoom();
-  };
-  window.addEventListener('socket_reconnected', handleReconnect);
-
-  socket.on('room_joined', (data) => {
-    console.log('✅ Server confirmed room join:', data);
-  });
-
-  const hydrateFromServer = async () => {
-    try {
-      const res = await fetch(`/api/app-state?userId=${userInfo.sub}`);
-      const data = await res.json();
-
-      if (cancelled) return;
-
-      if (data.success && data.state) {
-        const savedState = data.state;
-
-        if (typeof savedState !== 'object' || Array.isArray(savedState)) {
-          console.error('❌ Invalid state received from server:', savedState);
-          addLog('⚠️ Invalid state format from server', 'warning');
-          return;
-        }
-
-        isSyncingFromServer.current = true;
-
-        try {
-          setAppState(savedState);
-
-          setSelectedModels(savedState.selectedModels || []);
-          setStartingValue(String(savedState.startingValue ?? "100"));
-          setStopLoss(savedState.stopLoss || "");
-          setProfitTarget(savedState.profitTarget || "");
-          setIsTrading(savedState.isTrading || false);
-          setTradingStopped(savedState.tradingStopped || false);
-          setStopReason(savedState.stopReason || "");
-          setFinalProfitLoss(savedState.finalProfitLoss || null);
-          setInitialValues(savedState.initialValues || {});
-          setUpdateSpeed(savedState.updateSpeed || "1500");
-          setIsMockTrading(savedState.isMockTrading !== false);
-
-          appStateVersionRef.current = data.version ?? 0;
-
-          console.log('✅ State hydrated from server:', {
-            selectedModels: savedState.selectedModels?.length || 0,
-            isTrading: savedState.isTrading,
-            tradingStopped: savedState.tradingStopped,
-            version: data.version,
-          });
-
-          addLog('✅ Settings synced from server', 'success');
-        } finally {
-          isSyncingFromServer.current = false;
-        }
-      }
-    } catch (err) {
-      if (!cancelled) {
-        console.error('❌ Failed to load app state:', err);
-        addLog('⚠️ Failed to sync settings', 'warning');
-      }
+  const emitJoin = () => {
+    if (socket.connected) {
+      console.log("📡 [MOBILE-FIX] Emitting join_user_room...");
+      socket.emit('join_user_room', userInfo.sub);
     }
   };
 
-  hydrateFromServer();
+  // Try to join every 2 seconds until the server confirms
+  joinInterval = setInterval(emitJoin, 2000);
 
-  fetch(`/api/gemini/credentials/status?userId=${userInfo.sub}`)
-    .then(res => res.json())
-    .then(data => {
-      if (!cancelled && data.success && data.hasCredentials) {
-        addLog('💎 Gemini credentials found on server', 'info');
-      }
-    })
-    .catch(err => {
-      if (!cancelled) {
-        console.error('Failed to check Gemini credentials:', err);
-      }
-    });
+  socket.on('connect', emitJoin);
+  
+  // When server confirms, stop the interval
+  socket.on('room_joined', (data) => {
+    console.log("✅ [MOBILE-FIX] Room joined confirmed by server!");
+    clearInterval(joinInterval);
+  });
+
+  // Handle mobile "Wake Up"
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      socket.connect();
+      emitJoin();
+    }
+  };
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
   return () => {
-    cancelled = true;
-    socket.off('connect', joinRoom);
+    clearInterval(joinInterval);
+    socket.off('connect', emitJoin);
     socket.off('room_joined');
-    window.removeEventListener('socket_reconnected', handleReconnect);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   };
-}, [userInfo?.sub, socket]);
+}, [socket, userInfo?.sub]);
 
 // ✅ Position listeners
 useEffect(() => {
@@ -927,38 +865,20 @@ useEffect(() => {
 
   const onOpened = (pos) => {
     console.log('🟢 Position opened:', pos);
-    
-    addLog(
-      `🚀 ${pos.modelName} opened ${pos.side} on ${pos.symbol.toUpperCase()} @ $${pos.entryPrice.toFixed(2)}`, 
-      'success'
-    );
-    
-    fetchOpenPositions(userInfo.sub);
+    setOpenPositions(prev => [...prev, pos]); // ✅ Immediate UI update
+    addLog(`🚀 ${pos.modelName} opened ${pos.side} on ${pos.symbol.toUpperCase()} @ $${pos.entryPrice.toFixed(2)}`, 'success');
   };
 
   const onClosed = (payload) => {
     console.log('🔴 Position closed:', payload);
-    
-    const {
-      model_name,
-      symbol,
-      pnl,
-      entryPrice,
-      exitPrice,
-      quantity
-    } = payload;
-
-    const isProfit = pnl >= 0;
+    setOpenPositions(prev => prev.filter(p => 
+      !(p.modelId === payload.model_id && p.symbol.toLowerCase() === payload.symbol.toLowerCase())
+    )); // ✅ Immediate UI update
+    const isProfit = payload.pnl >= 0;
     const pnlText = isProfit
-      ? `✅ PROFIT +$${pnl.toFixed(2)}`
-      : `❌ LOSS -$${Math.abs(pnl).toFixed(2)}`;
-
-    addLog(
-      `📉 ${model_name} closed ${symbol.toUpperCase()} | Entry: $${entryPrice.toFixed(2)} → Exit: $${exitPrice.toFixed(2)} | Qty: ${quantity} | ${pnlText}`,
-      isProfit ? 'success' : 'error'
-    );
-
-    fetchOpenPositions(userInfo.sub);
+      ? `✅ PROFIT +$${payload.pnl.toFixed(2)}`
+      : `❌ LOSS -$${Math.abs(payload.pnl).toFixed(2)}`;
+    addLog(`📉 ${payload.model_name} closed ${payload.symbol.toUpperCase()} | Entry: $${payload.entryPrice.toFixed(2)} → Exit: $${payload.exitPrice.toFixed(2)} | Qty: ${payload.quantity} | ${pnlText}`, isProfit ? 'success' : 'error');
   };
 
   socket.on('position_opened', onOpened);
@@ -968,7 +888,7 @@ useEffect(() => {
     socket.off('position_opened', onOpened);
     socket.off('position_closed', onClosed);
   };
-}, [userInfo?.sub, socket]);
+}, [userInfo?.sub]);
 
 // ✅ NEW: Listen for log broadcasts from server
 useEffect(() => {
@@ -1001,7 +921,7 @@ useEffect(() => {
     isSyncingFromServer.current = true;
 
     try {
-      setAppState(state);
+      // ✅ Batch update all state vars to trigger a single re-render
       setSelectedModels(state.selectedModels || []);
       setStartingValue(String(state.startingValue ?? "100"));
       setStopLoss(state.stopLoss || "");
@@ -1970,6 +1890,27 @@ const handleCloseAllGeminiTrading = async () => {
 
   return (
     <div className="dashboard" style={{ minHeight: '100vh', paddingBottom: '40px' }}>
+      {/* 🚀 FORCE VISIBLE DEBUG BANNER */}
+      <div style={{
+        position: 'fixed',
+        top: '0',
+        left: '0',
+        width: '100%',
+        height: '30px',
+        background: 'rgba(0,0,0,0.9)',
+        color: '#00ff00',
+        zIndex: '999999',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '12px',
+        fontWeight: 'bold',
+        borderBottom: '1px solid #00ff00'
+      }}>
+        USER: {userInfo?.sub ? '✅' : '❌'} | 
+        SOCKET: {socketConnected ? '✅' : '❌'} | 
+        ID: {userInfo?.sub?.slice(-5)}
+      </div>
       {/* User Info Header with Logout */}
       <div style={{
         display: 'flex',

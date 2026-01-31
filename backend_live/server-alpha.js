@@ -20,7 +20,14 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: {
+    origin: "*", // Or your specific domain
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  allowEIO3: true, // Support older socket clients
+  transports: ['polling', 'websocket'],
+  path: '/socket.io/' // Explicitly set the path so Express doesn't intercept socket handshake
 });
 
 /* ------------------------------
@@ -397,7 +404,7 @@ async function closeLiveGeminiPositionAndRecord({
   symbol,
   amount,
   exitPrice,
-  userId,
+  userId, // ✅ Make sure this is passed
 }) {
   const key = livePosKey(modelId, symbol);
   const pos = liveGeminiPositions[key];
@@ -443,10 +450,7 @@ async function closeLiveGeminiPositionAndRecord({
   const remaining = pos.amount - qtyExecuted;
 
   if (remaining <= 0.00000001) {
-    // ✅ Position fully closed - remove from memory
     delete liveGeminiPositions[key];
-    
-    // ✅ Delete from database
     if (userId) {
       try {
         await db.query(
@@ -458,15 +462,11 @@ async function closeLiveGeminiPositionAndRecord({
         console.error('❌ Failed to delete position from DB:', err);
       }
     }
-    
     console.log(
       `✅ [LIVE] Fully closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qtyExecuted}, P&L = ${pnl.toFixed(2)}`
     );
   } else {
-    // ✅ Position partially closed - update remaining amount
     liveGeminiPositions[key].amount = remaining;
-    
-    // ✅ Update database with remaining amount
     if (userId) {
       try {
         await db.query(
@@ -478,7 +478,6 @@ async function closeLiveGeminiPositionAndRecord({
         console.error('❌ Failed to update position in DB:', err);
       }
     }
-    
     console.log(
       `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)}`
     );
@@ -499,7 +498,6 @@ async function closeLiveGeminiPositionAndRecord({
       timestamp,
     });
 
-    // ✅ Send log for position close
     const isProfit = pnl >= 0;
     const pnlText = isProfit
       ? `✅ PROFIT +$${pnl.toFixed(2)}`
@@ -511,7 +509,6 @@ async function closeLiveGeminiPositionAndRecord({
       `📉 ${modelName} closed ${symbol.toUpperCase()} | Entry: $${entryPrice.toFixed(2)} → Exit: $${exit.toFixed(2)} | Qty: ${qtyExecuted} | ${pnlText}`
     );
   } else {
-    // Fallback: broadcast globally if userId is missing (legacy support)
     io.emit('position_closed', {
       model_id: modelId,
       model_name: modelName,
@@ -2190,7 +2187,8 @@ async function startServer() {
   startUpdateInterval();
   startGeminiTradesPolling();
 
-  server.listen(PORT, () => {
+  // Bind to 0.0.0.0 so external devices can reach this service on a VPS
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend running on port ${PORT}`);
     console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
     console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));

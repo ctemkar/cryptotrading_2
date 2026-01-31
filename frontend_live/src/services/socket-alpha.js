@@ -1,33 +1,24 @@
 import { io } from 'socket.io-client';
 
-// ✅ Use explicit backend URL
-const BACKEND_URL = 'https://cryptotradinglive.lovehappyhours.com';
+//const BACKEND_URL = 'https://cryptotradinglive.lovehappyhours.com';
 
-const socket = io(BACKEND_URL, {
-  transports: ['websocket', 'polling'],
+const BACKEND_URL = "http://192.168.0.103:3002";
+
+/*const socket = io(BACKEND_URL, {
+  transports: ['polling', 'websocket'], // Polling first is safer for mobile
+  forceNew: true,
   reconnection: true,
   reconnectionDelay: 1000,
-  reconnectionAttempts: 5,
-});
+  reconnectionAttempts: Infinity, 
+  timeout: 20000,
+  rejectUnauthorized: false // Helps if there are SSL certificate issues on mobile
+}); */
 
-// Connection lifecycle logs
-socket.on('connect', () => {
-  console.log('✅ Socket connected:', socket.id);
-  console.log('🔗 Backend URL:', BACKEND_URL);
-  window.dispatchEvent(new CustomEvent('socket_connected'));
-});
-
-socket.on('disconnect', (reason) => {
-  console.log('❌ Socket disconnected:', reason);
-});
-
-socket.on('reconnect', (attemptNumber) => {
-  console.log('🔄 Socket reconnected after', attemptNumber, 'attempts');
-  window.dispatchEvent(new CustomEvent('socket_reconnected'));
-});
-
-socket.on('connect_error', (error) => {
-  console.error('⚠️ Socket connection error:', error.message);
+const socket = io(BACKEND_URL, {
+  path: '/socket.io/', // Explicitly define the path
+  transports: ['polling', 'websocket'],
+  reconnection: true,
+  reconnectionAttempts: 5
 });
 
 export default socket;
