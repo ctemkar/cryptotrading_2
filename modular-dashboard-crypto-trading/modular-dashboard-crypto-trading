@@ -1,0 +1,54 @@
+##
+## HTTP -> HTTPS redirect
+##
+server {
+    listen 80;
+    listen [::]:80;
+    server_name cryptotradinglive.lovehappyhours.com;
+
+    # Redirect everything to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+##
+## HTTPS server
+##
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name cryptotradinglive.lovehappyhours.com;
+
+    ssl_certificate /etc/letsencrypt/live/cryptotradinglive.lovehappyhours.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cryptotradinglive.lovehappyhours.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    root /var/www/modular-dashboard-crypto-trading/frontend/dist;
+    index index.html index.htm;
+
+    location / {
+        try_files $uri /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:3002/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:3002/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
