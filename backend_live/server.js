@@ -43,22 +43,26 @@ const GEMINI_TICK_SIZE = {
 const socketsById = new Map(); // Track all connected sockets by socket.id
 const userSockets = new Map(); // Track userId -> Set of socket.id
 
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3002;
+const BACKEND_HOST = '127.0.0.1';
+const BACKEND_BASE = `http://${BACKEND_HOST}:${PORT}`;
+
 /**
  * Validate if order amount meets Gemini's minimum requirements
  */
 function validateOrderAmount(symbol, amount) {
   const symbolKey = symbol.toLowerCase();
   const minSize = GEMINI_MIN_ORDER_SIZE[symbolKey];
-  
+
   if (!minSize) {
     return {
       valid: false,
       error: `Unknown symbol: ${symbol}`,
     };
   }
-  
+
   const amountNum = parseFloat(amount);
-  
+
   if (amountNum < minSize) {
     return {
       valid: false,
@@ -67,7 +71,7 @@ function validateOrderAmount(symbol, amount) {
       attempted: amountNum,
     };
   }
-  
+
   return { valid: true };
 }
 
@@ -219,7 +223,7 @@ function decrypt(enc, iv, authTag) {
 --------------------------------*/
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   const env = payload.env === 'sandbox' ? 'sandbox' : 'live';
-  
+
   const baseUrl =
     env === 'sandbox'
       ? 'https://api.sandbox.gemini.com'
@@ -423,13 +427,13 @@ async function closeLiveGeminiPositionAndRecord({
    MODELS INITIAL STATE
 --------------------------------*/
 const MODELS = [
-  { id: "gemini-3-pro",      name: "Gemini-3-pro",            color: "#1f77b4", volatility: 0.5 },
-  { id: "qwen-3-next",       name: "Qwen3-Next",              color: "#ff7f0e", volatility: 0.3 },
-  { id: "gpt-5.2",           name: "GPT-5.2",                 color: "#2ca02c", volatility: 0.7 },
-  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5",       color: "#d62728", volatility: 0.4 },
-  { id: "mystery-model",     name: "Mystery Model",           color: "#9467bd", volatility: 1.0 },
-  { id: "deepseek",          name: "DeepSeek-V3.2-Speciale",  color: "#8e24aa", volatility: 0.6 },
-  { id: "grok",              name: "Grok",                    color: "#ff9800", volatility: 0.7 }
+  { id: "gemini-3-pro", name: "Gemini-3-pro", color: "#1f77b4", volatility: 0.5 },
+  { id: "qwen-3-next", name: "Qwen3-Next", color: "#ff7f0e", volatility: 0.3 },
+  { id: "gpt-5.2", name: "GPT-5.2", color: "#2ca02c", volatility: 0.7 },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", color: "#d62728", volatility: 0.4 },
+  { id: "mystery-model", name: "Mystery Model", color: "#9467bd", volatility: 1.0 },
+  { id: "deepseek", name: "DeepSeek-V3.2-Speciale", color: "#8e24aa", volatility: 0.6 },
+  { id: "grok", name: "Grok", color: "#ff9800", volatility: 0.7 }
 ];
 
 const STARTING_VALUE = 100;
@@ -595,12 +599,12 @@ function startUpdateInterval() {
   if (updateIntervalId) {
     clearInterval(updateIntervalId);
   }
-  
+
   updateIntervalId = setInterval(() => {
     updateModels();
     updateCryptoPrices();
   }, UPDATE_INTERVAL);
-  
+
   console.log(`Update interval set to ${UPDATE_INTERVAL}ms`);
 }
 
@@ -622,23 +626,41 @@ function startGeminiTradesPolling() {
     clearInterval(geminiTradesIntervalId);
   }
 
+  const symbols = ['btcusd', 'ethusd', 'solusd'];
+  const POLL_INTERVAL = 5000;
+
   geminiTradesIntervalId = setInterval(async () => {
-    const symbols = ['btcusd', 'ethusd', 'solusd'];
-    
     for (const symbol of symbols) {
       try {
-        await axios.get('http://localhost:3001/api/gemini/market-trades', {
-          params: { symbol, limit: 20 },
-          timeout: 10000,
+        const env = 'live'; // change if you want sandboxable behavior
+        const baseUrl = env === 'sandbox' ? 'https://api.sandbox.gemini.com' : 'https://api.gemini.com';
+        const url = `${baseUrl}/v1/trades/${symbol}`;
+
+        const response = await axios.get(url, { params: { limit_trades: 20 }, timeout: 10000 });
+        const trades = Array.isArray(response.data) ? response.data : [];
+        geminiMarketTradesCache[symbol] = trades.slice(0, 20);
+
+        // Emit to sockets once we have new data
+        io.emit('gemini_market_trades', {
+          symbol,
+          trades: geminiMarketTradesCache[symbol]
         });
-        console.log(`🔄 Auto-polled Gemini market trades (${symbol})`);
+
+        console.log(`🔄 Auto-polled Gemini market trades (${symbol}) — fetched ${trades.length}`);
       } catch (e) {
-        console.error(`❌ Failed to poll Gemini trades for ${symbol}:`, e.message);
+        // Log full error context but don't kill the loop
+        console.error(`❌ Failed to poll Gemini trades for ${symbol}:`, {
+          message: e.message,
+          status: e.response?.status,
+          responseData: e.response?.data,
+          code: e.code
+        });
+        // keep previous cache (if any). UI will receive cached results via /api/gemini/market-trades fallback
       }
     }
-  }, 5000);
+  }, POLL_INTERVAL);
 
-  console.log("✅ Gemini market trades auto-polling started for BTC, ETH, SOL (every 5s)");
+  console.log(`✅ Gemini market trades auto-polling started for ${symbols.join(', ')} (every ${POLL_INTERVAL}ms)`);
 }
 
 // ========================================
@@ -679,7 +701,7 @@ app.post("/api/auth/google", async (req, res) => {
       details: data || error.message,
     });
   }
-}); 
+});
 
 // APP STATE ENDPOINTS
 app.get('/api/app-state', async (req, res) => {
@@ -829,6 +851,56 @@ app.put('/api/app-state', async (req, res) => {
   }
 });
 
+// --- Gemini Trading Start Route ---
+// PUT/REPLACE this whole route in backend/server.js
+// DEBUG helper: paste temporarily into backend/server.js replacing the existing /api/gemini/start-trading handler
+app.post('/api/gemini/start-trading', async (req, res) => {
+  try {
+    const { userId, modelId, modelName, startValue, stopLoss, profitTarget, isMockTrading = true } = req.body;
+
+    if (!userId || !modelId || !modelName) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    const now = Date.now();
+    const sessionJson = JSON.stringify({ modelId, modelName, startValue, stopLoss, profitTarget, isMockTrading, startedAt: now });
+
+    // Update session
+    await db.query(
+      `INSERT INTO user_trading_session (user_id, is_active, started_at, session_json, updated_at)
+       VALUES (?, 1, NOW(), ?, NOW())
+       ON DUPLICATE KEY UPDATE is_active = 1, started_at = NOW(), session_json = ?, updated_at = NOW()`,
+      [userId, sessionJson, sessionJson]
+    );
+
+    // Log start - FIXED: 4 placeholders for 4 columns + NOW()
+    await db.query(
+      'INSERT INTO trade_logs_archive (user_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, NOW())',
+      [userId, `Started trading: ${modelName}`, 'info', sessionJson]
+    );
+
+    // Mock Trade Logic
+    const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
+    const entryPrice = cryptoPrices['BTCUSDT'] || 50000;
+    const quantity = (parseFloat(startValue) / entryPrice).toFixed(6);
+    
+    await db.query(
+      `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, modelId, modelName, side, 'BTCUSDT', entryPrice, quantity, startValue, now]
+    );
+
+    if (io) {
+      io.to(`user:${userId}`).emit('log_entry', { message: `Model ${modelName} executed ${side} @ ${entryPrice}`, type: 'trade', time: now });
+    }
+
+    res.json({ success: true, message: 'Trading started' });
+  } catch (err) {
+    console.error('ERROR:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // TRADING SESSION ENDPOINTS
 app.get('/api/trading-session', async (req, res) => {
   const { userId } = req.query;
@@ -893,7 +965,7 @@ app.post('/api/trading-session', async (req, res) => {
 app.post('/api/logs/archive', async (req, res) => {
   try {
     const { userId, sessionId, message, type, metadata } = req.body;
-    
+
     // ✅ Add validation
     if (!userId) {
       console.warn('⚠️ Log archive called without userId, skipping');
@@ -914,8 +986,8 @@ app.post('/api/logs/archive', async (req, res) => {
     }
 
     await db.query(
-      'INSERT INTO trade_logs_archive (user_id, session_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, ?, NOW())',
-      [userId, sessionId || null, message, type || 'info', metadataJson]
+      'INSERT INTO trade_logs_archive (user_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, NOW())',
+      [userId, message, type || 'info', metadataJson]
     );
 
     console.log(`✅ Archived log for user ${userId}: ${message}`);
@@ -923,12 +995,12 @@ app.post('/api/logs/archive', async (req, res) => {
   } catch (err) {
     console.error('❌ Archiving error:', err.message);
     console.error('❌ Full error:', err);
-    
+
     // Don't crash - just log and return error
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: 'Failed to archive log',
-      details: err.message 
+      details: err.message
     });
   }
 });
@@ -941,8 +1013,8 @@ app.post('/api/logs/archive', async (req, res) => {
     const metadataJson = JSON.stringify(metadata || {});
 
     await db.query(
-      'INSERT INTO trade_logs_archive (user_id, session_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, ?, NOW())',
-      [userId, sessionId || null, message, type, metadataJson]
+      'INSERT INTO trade_logs_archive (user_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, NOW())',
+      [userId, message, type, metadataJson]
     );
 
     console.log(`✅ Archived log for user ${userId}`);
@@ -953,11 +1025,30 @@ app.post('/api/logs/archive', async (req, res) => {
   }
 });
 
+app.get('/api/logs/archive', async (req, res) => {
+  try {
+    const { userId, limit = 100 } = req.query;
+    let q = 'SELECT id, user_id, session_id, message, type, metadata, timestamp FROM trade_logs_archive';
+    const params = [];
+    if (userId) {
+      q += ' WHERE user_id = ?';
+      params.push(userId);
+    }
+    q += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(Number(limit));
+    const [rows] = await db.query(q, params);
+    return res.json({ success: true, logs: rows });
+  } catch (err) {
+    console.error('❌ Error fetching logs:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch logs' });
+  }
+});
+
 // GEMINI CREDENTIALS ENDPOINTS
 app.post('/api/gemini/credentials', async (req, res) => {
   try {
     const { userId, apiKey, apiSecret, env } = req.body;
-    
+
     if (!userId || !apiKey || !apiSecret) {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
@@ -990,7 +1081,7 @@ app.get('/api/gemini/credentials/status', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
 
     const [rows] = await db.query('SELECT env FROM user_gemini_credentials WHERE user_id = ?', [userId]);
-    
+
     return res.json({
       success: true,
       hasCredentials: rows.length > 0,
@@ -1008,7 +1099,7 @@ app.delete('/api/gemini/credentials', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
 
     await db.query('DELETE FROM user_gemini_credentials WHERE user_id = ?', [userId]);
-    
+
     console.log(`🗑️ Deleted Gemini credentials for user ${userId}`);
     return res.json({ success: true });
   } catch (err) {
@@ -1034,13 +1125,13 @@ app.get("/api/trades", async (req, res) => {
 app.post("/api/gemini/balances", async (req, res) => {
   try {
     console.log("📥 Received request body:", req.body);
-    
+
     const { userId, env = 'live' } = req.body;
 
     if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "User ID is required" 
+      return res.status(400).json({
+        success: false,
+        error: "User ID is required"
       });
     }
 
@@ -1052,9 +1143,9 @@ app.post("/api/gemini/balances", async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(401).json({ 
-        success: false, 
-        error: 'No Gemini credentials found. Please connect your Gemini account first.' 
+      return res.status(401).json({
+        success: false,
+        error: 'No Gemini credentials found. Please connect your Gemini account first.'
       });
     }
 
@@ -1073,36 +1164,36 @@ app.post("/api/gemini/balances", async (req, res) => {
     }
 
     console.log("🔗 Connecting to Gemini API for balances...", { env: env || storedEnv });
-    
+
     const balances = await geminiRequest(api_key, apiSecret, "/v1/balances", { env: env || storedEnv });
 
     console.log("✅ Gemini API response received");
     console.log("🔍 Raw Gemini balances:", JSON.stringify(balances, null, 2));
 
     const [
-        btcPrice, ethPrice, solPrice,
-        xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
-        shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
-        hntPrice, dotPrice, ftmPrice, skyPrice
-      ] = await Promise.all([
-        getGeminiPrice("btcusd", env || storedEnv),
-        getGeminiPrice("ethusd", env || storedEnv),
-        getGeminiPrice("solusd", env || storedEnv),
-        getGeminiPrice("xrpusd", env || storedEnv),
-        getGeminiPrice("avaxusd", env || storedEnv),
-        getGeminiPrice("linkusd", env || storedEnv),
-        getGeminiPrice("daiusd", env || storedEnv),
-        getGeminiPrice("ampusd", env || storedEnv),
-        getGeminiPrice("shibusd", env || storedEnv),
-        getGeminiPrice("atomusd", env || storedEnv),
-        getGeminiPrice("dogeusd", env || storedEnv),
-        getGeminiPrice("polusd", env || storedEnv),
-        getGeminiPrice("rndrusd", env || storedEnv),
-        getGeminiPrice("hntusd", env || storedEnv),
-        getGeminiPrice("dotusd", env || storedEnv),
-        getGeminiPrice("ftmusd", env || storedEnv),
-        getGeminiPrice("skyusd", env || storedEnv)
-      ]);
+      btcPrice, ethPrice, solPrice,
+      xrpPrice, avaxPrice, linkPrice, daiPrice, ampPrice,
+      shibPrice, atomPrice, dogePrice, polPrice, rndrPrice,
+      hntPrice, dotPrice, ftmPrice, skyPrice
+    ] = await Promise.all([
+      getGeminiPrice("btcusd", env || storedEnv),
+      getGeminiPrice("ethusd", env || storedEnv),
+      getGeminiPrice("solusd", env || storedEnv),
+      getGeminiPrice("xrpusd", env || storedEnv),
+      getGeminiPrice("avaxusd", env || storedEnv),
+      getGeminiPrice("linkusd", env || storedEnv),
+      getGeminiPrice("daiusd", env || storedEnv),
+      getGeminiPrice("ampusd", env || storedEnv),
+      getGeminiPrice("shibusd", env || storedEnv),
+      getGeminiPrice("atomusd", env || storedEnv),
+      getGeminiPrice("dogeusd", env || storedEnv),
+      getGeminiPrice("polusd", env || storedEnv),
+      getGeminiPrice("rndrusd", env || storedEnv),
+      getGeminiPrice("hntusd", env || storedEnv),
+      getGeminiPrice("dotusd", env || storedEnv),
+      getGeminiPrice("ftmusd", env || storedEnv),
+      getGeminiPrice("skyusd", env || storedEnv)
+    ]);
 
     console.log("💵 Real Gemini prices:", {
       btcPrice, ethPrice, solPrice,
@@ -1127,73 +1218,73 @@ app.post("/api/gemini/balances", async (req, res) => {
       if (amount <= 0) return;
 
       switch (currency) {
-          case "btc":
-            balanceData.btc = amount;
-            if (btcPrice) totalUsd += amount * btcPrice;
-            break;
-          case "eth":
-            balanceData.eth = amount;
-            if (ethPrice) totalUsd += amount * ethPrice;
-            break;
-          case "sol":
-            balanceData.sol = amount;
-            if (solPrice) totalUsd += amount * solPrice;
-            break;
-          case "xrp":
-            if (xrpPrice) totalUsd += amount * xrpPrice;
-            break;
-          case "avax":
-            if (avaxPrice) totalUsd += amount * avaxPrice;
-            break;
-          case "link":
-            if (linkPrice) totalUsd += amount * linkPrice;
-            break;
-          case "dai":
-            if (daiPrice) totalUsd += amount * daiPrice;
-            break;
-          case "amp":
-            if (ampPrice) totalUsd += amount * ampPrice;
-            break;
-          case "shib":
-            if (shibPrice) totalUsd += amount * shibPrice;
-            break;
-          case "atom":
-            if (atomPrice) totalUsd += amount * atomPrice;
-            break;
-          case "doge":
-            if (dogePrice) totalUsd += amount * dogePrice;
-            break;
-          case "pol":
-            if (polPrice) totalUsd += amount * polPrice;
-            break;
-          case "rndr":
-            if (rndrPrice) totalUsd += amount * rndrPrice;
-            break;
-          case "hnt":
-            if (hntPrice) totalUsd += amount * hntPrice;
-            break;
-          case "dot":
-            if (dotPrice) totalUsd += amount * dotPrice;
-            break;
-          case "ftm":
-            if (ftmPrice) totalUsd += amount * ftmPrice;
-            break;
-          case "sky":
-            if (skyPrice) totalUsd += amount * skyPrice;
-            break;
-          case "usdc":
-          case "usd":
-          case "gusd":
-            balanceData.usdc += amount;
-            totalUsd += amount;
-            break;
+        case "btc":
+          balanceData.btc = amount;
+          if (btcPrice) totalUsd += amount * btcPrice;
+          break;
+        case "eth":
+          balanceData.eth = amount;
+          if (ethPrice) totalUsd += amount * ethPrice;
+          break;
+        case "sol":
+          balanceData.sol = amount;
+          if (solPrice) totalUsd += amount * solPrice;
+          break;
+        case "xrp":
+          if (xrpPrice) totalUsd += amount * xrpPrice;
+          break;
+        case "avax":
+          if (avaxPrice) totalUsd += amount * avaxPrice;
+          break;
+        case "link":
+          if (linkPrice) totalUsd += amount * linkPrice;
+          break;
+        case "dai":
+          if (daiPrice) totalUsd += amount * daiPrice;
+          break;
+        case "amp":
+          if (ampPrice) totalUsd += amount * ampPrice;
+          break;
+        case "shib":
+          if (shibPrice) totalUsd += amount * shibPrice;
+          break;
+        case "atom":
+          if (atomPrice) totalUsd += amount * atomPrice;
+          break;
+        case "doge":
+          if (dogePrice) totalUsd += amount * dogePrice;
+          break;
+        case "pol":
+          if (polPrice) totalUsd += amount * polPrice;
+          break;
+        case "rndr":
+          if (rndrPrice) totalUsd += amount * rndrPrice;
+          break;
+        case "hnt":
+          if (hntPrice) totalUsd += amount * hntPrice;
+          break;
+        case "dot":
+          if (dotPrice) totalUsd += amount * dotPrice;
+          break;
+        case "ftm":
+          if (ftmPrice) totalUsd += amount * ftmPrice;
+          break;
+        case "sky":
+          if (skyPrice) totalUsd += amount * skyPrice;
+          break;
+        case "usdc":
+        case "usd":
+        case "gusd":
+          balanceData.usdc += amount;
+          totalUsd += amount;
+          break;
 
-          default:
-            balanceData.other.push({
-              currency: balance.currency,
-              amount: amount
-            });
-        }
+        default:
+          balanceData.other.push({
+            currency: balance.currency,
+            amount: amount
+          });
+      }
     });
 
     balanceData.totalUsd = parseFloat(totalUsd.toFixed(2));
@@ -1209,11 +1300,11 @@ app.post("/api/gemini/balances", async (req, res) => {
   } catch (error) {
     console.error("❌ Gemini connection error:", error.message);
     console.error("❌ Full error:", error.response?.data);
-    
+
     if (error.response) {
       const status = error.response.status;
       const data = error.response.data;
-      
+
       if (status === 400) {
         return res.status(400).json({
           success: false,
@@ -1245,45 +1336,111 @@ app.post("/api/gemini/balances", async (req, res) => {
 });
 
 // GEMINI MARKET TRADES ENDPOINT
+// GEMINI MARKET TRADES ENDPOINT (robust normalization + cached fallback)
 app.get("/api/gemini/market-trades", async (req, res) => {
   try {
-    const { symbol = 'btcusd', limit = 20, env = 'live' } = req.query;
+    // Accept multiple possible query param names because frontends vary
+    let symbolRaw = (req.query.symbol || req.query.t || req.query.pair || req.query.s || '').toString();
+    let limitRaw = req.query.limit || req.query.limit_trades || req.query.l || '20';
+    const env = (req.query.env || 'live').toString().toLowerCase();
 
-    console.log(`🔗 Fetching market trades for ${symbol}...`);
+    // Normalize inputs
+    symbolRaw = symbolRaw.trim();
+    let limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 200);
 
-    const baseUrl =
-      env === 'sandbox'
-        ? 'https://api.sandbox.gemini.com'
-        : 'https://api.gemini.com';
+    // sanitize symbol: remove non-alphanum, lowercase
+    const cleaned = symbolRaw.replace(/[^a-z0-9]/gi, '').toLowerCase();
 
-    const response = await axios.get(
-      `${baseUrl}/v1/trades/${symbol}`,
-      { params: { limit_trades: limit }, timeout: 10000 }
-    );
+    // map common variants -> gemini supported pair names
+    // Gemini uses e.g. btcusd, ethusd, solusd (no trailing t for USDT)
+    let symbol = cleaned;
+    if (!symbol) {
+      symbol = 'btcusd';
+    } else {
+      // convert usdt -> usd (common frontend sends BTCUSDT)
+      symbol = symbol.replace(/usdt$/i, 'usd');
+      // some frontends might send pairs like btc_usdt, btc-usd, etc. cleaned above
+      // ensure we map usdc/usdt/usd variants consistently
+      symbol = symbol.replace(/usd(c)?$/i, 'usd');
+    }
 
-    const trades = response.data || [];
-    console.log(`✅ Fetched ${trades.length} market trades`);
+    const allowed = new Set(['btcusd', 'ethusd', 'solusd']); // extend if needed
 
-    const symbolKey = symbol.toLowerCase();
-    geminiMarketTradesCache[symbolKey] = trades.slice(0, limit);
+    // defensive: if symbol not in allowed, try a last-ditch mapping based on prefix
+    if (!allowed.has(symbol)) {
+      // try mapping by prefix (btc, eth, sol)
+      if (symbol.startsWith('btc')) symbol = 'btcusd';
+      else if (symbol.startsWith('eth')) symbol = 'ethusd';
+      else if (symbol.startsWith('sol')) symbol = 'solusd';
+    }
 
-    io.emit('gemini_market_trades', {
-      symbol: symbolKey,
-      trades: geminiMarketTradesCache[symbolKey],
-    });
+    if (!allowed.has(symbol)) {
+      console.warn('Unsupported/invalid symbol requested for market-trades:', { original: symbolRaw, cleaned, mapped: symbol });
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported symbol: ${symbolRaw}`,
+        normalized: symbol,
+      });
+    }
 
-    res.json({
-      success: true,
-      trades,
-      symbol
-    });
+    console.log(`🔗 Fetching market trades for ${symbol} (limit=${limit}, env=${env})...`);
 
-  } catch (error) {
-    console.error("❌ Error fetching market trades:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch market trades"
-    });
+    const baseUrl = env === 'sandbox' ? 'https://api.sandbox.gemini.com' : 'https://api.gemini.com';
+    const url = `${baseUrl}/v1/trades/${symbol}`;
+
+    try {
+      const response = await axios.get(url, { params: { limit_trades: limit }, timeout: 10000 });
+      const trades = Array.isArray(response.data) ? response.data : [];
+      geminiMarketTradesCache[symbol] = trades.slice(0, limit);
+
+      // broadcast to sockets
+      io.emit('gemini_market_trades', {
+        symbol,
+        trades: geminiMarketTradesCache[symbol],
+      });
+
+      console.log(`✅ Fetched ${trades.length} market trades for ${symbol}`);
+      return res.json({ success: true, trades: geminiMarketTradesCache[symbol], symbol, isCached: false });
+    } catch (err) {
+      // log details for debugging
+      console.error("❌ Error fetching market trades (external):", {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        code: err.code
+      });
+
+      // fallback to cached trades if available
+      const cached = geminiMarketTradesCache[symbol] || [];
+      if (cached.length) {
+        console.warn(`⚠️ Returning ${cached.length} cached trades for ${symbol} due to external API failure`);
+        return res.status(200).json({
+          success: true,
+          warning: 'Returned cached results due to external API failure',
+          trades: cached,
+          symbol,
+          isCached: true,
+          details: {
+            status: err.response?.status,
+            message: err.message,
+          }
+        });
+      }
+
+      // no cache -> return useful error
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to fetch market trades from Gemini and no cached data available',
+        symbol,
+        details: {
+          status: err.response?.status,
+          message: err.message,
+        }
+      });
+    }
+  } catch (err) {
+    console.error('❌ /api/gemini/market-trades UNCAUGHT ERROR:', err);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
@@ -1939,7 +2096,7 @@ io.on("connection", socket => {
     }
 
     socket.join(`user:${userId}`);
-    
+
     if (!userSockets.has(userId)) {
       userSockets.set(userId, new Set());
     }
@@ -1989,14 +2146,14 @@ io.on("connection", socket => {
 
   socket.on("disconnect", () => {
     console.log("❌ Socket disconnected:", socket.id);
-    
+
     socketsById.delete(socket.id);
-    
+
     for (const [userId, sockets] of userSockets.entries()) {
       if (sockets.has(socket.id)) {
         sockets.delete(socket.id);
         console.log(`📊 User ${userId} now has ${sockets.size} connected socket(s)`);
-        
+
         if (sockets.size === 0) {
           userSockets.delete(userId);
           console.log(`🗑️ User ${userId} has no more connected sockets`);
@@ -2012,17 +2169,30 @@ io.on("connection", socket => {
 // ========================================
 async function startServer() {
   await initDatabase();
-  
+
   startUpdateInterval();
   startGeminiTradesPolling();
 
-  server.listen(3001, () => {
+  /*server.listen(3001, () => {
     console.log("🚀 Backend running on port 3001");
     console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
     console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
     console.log("💎 Gemini API endpoints ready");
     console.log("🔄 Gemini market trades WebSocket broadcasting enabled");
-  });
+  });*/
+  /*server.listen(3002, () => {
+    console.log("🚀 Backend running on port 3002");
+    console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
+    console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
+    console.log("💎 Gemini API endpoints ready");
+    console.log("🔄 Gemini market trades WebSocket broadcasting enabled");
+  });*/
+  server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
+  console.log("📊 Models initialized:", MODELS.map(m => m.name).join(", "));
+  console.log("💰 Crypto prices initialized:", CRYPTO_SYMBOLS.map(c => `${c.symbol}: $${c.startPrice}`).join(", "));
+  console.log("💎 Gemini API endpoints ready");
+  console.log("🔄 Gemini market trades WebSocket broadcasting enabled");
+});
 }
-
 startServer();
