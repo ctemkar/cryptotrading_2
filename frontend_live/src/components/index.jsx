@@ -394,7 +394,7 @@ function Dashboard() {
       }
 
       // Fetch trades robustly: try hook-based fetch, fallback to API path
-      const symbols = ['btcusd', 'ethusd', 'solusd'];
+      /*const symbols = ['btcusd', 'ethusd', 'solusd'];
 
       const normalize = (t) => ({
         symbol: (t.crypto_symbol || t.symbol || '').toUpperCase(),
@@ -453,12 +453,14 @@ function Dashboard() {
         .slice(0, 20);
 
       setGeminiTransactions(combinedTrades);
-      console.log('[handleGeminiLogin] combinedTrades length:', combinedTrades.length);
+      console.log('[handleGeminiLogin] combinedTrades length:', combinedTrades.length);*/
+
+      await fetchGeminiTransactions();
 
       return {
         success: true,
         balances: result?.success ? result.data : null,
-        transactions: combinedTrades
+        transactions: [] // ✅ Just return an empty array or remove this line
       };
     } catch (error) {
       console.error('Gemini Login Flow Error:', error);
@@ -989,11 +991,11 @@ function Dashboard() {
           // fallback to API endpoint
           try {
             await withTimeout(
-              axios.post('/api/gemini/stop-all', { userId: userInfo?.sub }, { timeout: 25_000 }),
+              axios.post('/api/gemini/close-all', { userId: userInfo?.sub }, { timeout: 25_000 }),
               30_000
             );
           } catch (apiErr) {
-            console.warn("Fallback /api/gemini/stop-all failed:", apiErr?.message || apiErr);
+            console.warn("Fallback /api/gemini/close-all failed:", apiErr?.message || apiErr);
             throw apiErr;
           }
         }
@@ -1225,37 +1227,44 @@ Continue?`
   // ==========================================
   // POINT 2: NEW FETCH LOGIC FOR GEMINI TRADES
   // ==========================================
-  const fetchGeminiHistory = useCallback(async () => {
+  const fetchGeminiTransactions = useCallback(async () => {
     if (!userInfo?.sub) return;
-    const symbols = ['btcusd', 'ethusd', 'solusd'];
-    const all = [];
 
-    for (const s of symbols) {
-      try {
-        // Added env: 'live' to match your console screenshot requirements
-        const resp = await axios.get('/api/gemini/market-trades', {
-          params: { symbol: s, limit: 20, env: 'live' } 
-        });
+    try {
+      const resp = await axios.get('/api/gemini/transactions', {
+        params: { userId: userInfo.sub, limit: 20 }
+      });
 
-        const rawArr = Array.isArray(resp.data?.trades) ? resp.data.trades : (Array.isArray(resp.data) ? resp.data : []);
-        if (rawArr.length) {
-          // We pass 's' as the fallback symbol if the JSON is missing it
-          all.push(...rawArr.map(t => normalizeGeminiTrade(t, s)));
-        }
-      } catch (err) {
-        console.warn(`[fetchGeminiHistory] ${s} fetch failed:`, err?.response?.status || err?.message || err);
-      }
+      const raw = resp.data?.transactions || [];
+
+      const normalized = raw.map(tx => ({
+        id: tx.id,
+        symbol: (tx.crypto_symbol || 'UNKNOWN').toUpperCase(),
+        side: (tx.action || 'buy').toLowerCase(),
+        price: Number(tx.crypto_price || 0),
+        amount: Number(tx.quantity || 0),
+        // 🕒 FIX: Map 'created_at' from your DB to 'timestamp'
+        timestamp: tx.created_at 
+      }));
+
+      setGeminiTransactions(normalized);
+      console.log('Normalized Transactions:', normalized); // Check console again after this
+    } catch (err) {
+      console.error('❌ Failed to fetch transactions:', err);
     }
-
-    all.sort((a, b) => b.timestamp - a.timestamp);
-    setGeminiTransactions(all.slice(0, 20));
   }, [userInfo?.sub]);
 
   useEffect(() => {
-    if (isAuthenticated && userInfo?.sub) {
-      fetchGeminiHistory();
-    }
-  }, [isAuthenticated, userInfo?.sub, fetchGeminiHistory]);
+    if (!isAuthenticated || !userInfo?.sub) return;
+
+    fetchGeminiTransactions(); // Initial fetch
+
+    const interval = setInterval(() => {
+      fetchGeminiTransactions();
+    }, 3000); // Poll every 3 seconds
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, userInfo?.sub, fetchGeminiTransactions]);
 
   // --- useEffect for socket connection ---
   useEffect(() => {
@@ -1363,13 +1372,15 @@ Continue?`
 
         if (!mounted) return;
 
-        const gemini = normalized.filter(t => t.isGemini).slice(0, 20);
+        // ❌ REMOVED: const gemini = normalized.filter(t => t.isGemini).slice(0, 20);
         const mock = normalized.filter(t => !t.isGemini).slice(0, 20);
 
-        setGeminiTransactions(gemini);
-        setTrades(mock);
+        // ❌ REMOVED: setGeminiTransactions(gemini);
+        setTrades(mock); // ✅ Only update mock trades
 
-        if (typeof addLog === 'function') addLog(`Bulk trades update: ${gemini.length} gemini / ${mock.length} mock`, 'info');
+        if (typeof addLog === 'function') {
+          addLog(`Bulk trades update: ${mock.length} mock`, 'info');
+        }
       } catch (err) {
         console.warn('handleTradesUpdate error', err);
       }
@@ -1384,8 +1395,8 @@ Continue?`
     const onTrade = (t) => handleIncomingTrade(t, 'Mock');
     const onGeminiTrade = (t) => handleIncomingTrade(t, 'Gemini');
     const onNewGeminiTrade = (t) => handleIncomingTrade(t, 'Gemini');
-    const onTradesUpdate = handleTradesUpdate;
-    const onMarketTrades = handleTradesUpdate;
+    //const onTradesUpdate = handleTradesUpdate;
+    //const onMarketTrades = handleTradesUpdate;
 
     // Bind socket events
     socket.on('connect', onConnect);
@@ -1395,19 +1406,30 @@ Continue?`
     socket.on('new_trade', onNewTrade);
     socket.on('mock_trade', onMockTrade);
     socket.on('trade', onTrade);
-    socket.on('gemini_trade', onGeminiTrade);
-    socket.on('new_gemini_trade', onNewGeminiTrade);
-
-    socket.on('trades_update', onTradesUpdate);
-    socket.on('market_trades', onMarketTrades);
-    socket.on('initial_trades', onTradesUpdate);
-    socket.on('trades', onTradesUpdate);
+    //socket.on('gemini_trade', onGeminiTrade);
+    //socket.on('new_gemini_trade', onNewGeminiTrade);
+    socket.on('gemini_transaction', (tx) => {
+      const normalizedTx = {
+        id: tx.id,
+        symbol: (tx.crypto_symbol || tx.symbol || 'UNKNOWN').toUpperCase(),
+        side: (tx.action || tx.side || 'buy').toLowerCase(),
+        price: Number(tx.crypto_price || tx.price || 0),
+        amount: Number(tx.quantity || tx.amount || 0),
+        // 🕒 Use created_at from the socket payload
+        timestamp: tx.created_at || new Date().toISOString() 
+      };
+      setGeminiTransactions(prev => [normalizedTx, ...prev].slice(0, 20));
+    });
+    //socket.on('trades_update', onTradesUpdate);
+    //socket.on('market_trades', onMarketTrades);
+    //socket.on('initial_trades', onTradesUpdate);
+    //socket.on('trades', onTradesUpdate);
 
     // defensive initial request
     try {
       if (typeof socket.emit === 'function') {
         socket.emit('request_trades');
-        socket.emit('request_market_trades');
+        //socket.emit('request_market_trades');
       }
     } catch (err) {
       // ignore
@@ -1430,17 +1452,17 @@ Continue?`
       socket.off('gemini_trade', onGeminiTrade);
       socket.off('new_gemini_trade', onNewGeminiTrade);
 
-      socket.off('trades_update', onTradesUpdate);
-      socket.off('market_trades', onMarketTrades);
-      socket.off('initial_trades', onTradesUpdate);
-      socket.off('trades', onTradesUpdate);
+      //socket.off('trades_update', onTradesUpdate);
+      //socket.off('market_trades', onMarketTrades);
+      //socket.off('initial_trades', onTradesUpdate);
+      //socket.off('trades', onTradesUpdate);
 
       socket.off('debug_trade_raw', debugRawHandler);
     };
   }, [socket, addLog]);
 
   // --- NEW: explicit fetch for /api/gemini/market-trades to populate last 20 gemini transactions on login/mount ---
-  useEffect(() => {
+  /*useEffect(() => {
     let mounted = true;
     if (!userInfo?.sub) return;
 
@@ -1503,7 +1525,7 @@ Continue?`
     return () => {
       mounted = false;
     };
-  }, [userInfo?.sub]);
+  }, [userInfo?.sub]); */
 
   if (isLoadingAuth) {
     return (
@@ -1729,7 +1751,7 @@ Continue?`
                 const side = (tx.side || tx.type || tx.action || tx.raw?.side || tx.raw?.type || 'buy').toString().toLowerCase();
                 const priceNum = Number(tx.price ?? tx.p ?? tx.raw?.price ?? tx.raw?.crypto_price ?? NaN);
                 const amountNum = Number(tx.amount ?? tx.size ?? tx.quantity ?? tx.raw?.amount ?? NaN);
-                const tsNum = Number(tx.timestamp ?? tx.timestampms ?? tx.time ?? tx.raw?.timestamp ?? Date.now());
+                const tsNum = tx.timestamp ?? tx.timestampms ?? tx.time ?? tx.created_at ?? tx.raw?.timestamp ?? Date.now();
 
                 const priceDisplay = Number.isFinite(priceNum)
                   ? `$${priceNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -1798,7 +1820,7 @@ Continue?`
 
       <TransactionsTable
         loadingTrades={loadingTrades}
-        trades={trades}
+        trades={geminiTransactions}  // ✅ Make sure this is geminiTransactions
         formatTimestamp={formatTimestamp}
       />
     </div>

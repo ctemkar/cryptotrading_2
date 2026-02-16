@@ -337,7 +337,9 @@ function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price, sid
   });
 }
 
+// ✅ Added userId to the parameters
 async function closeLiveGeminiPositionAndRecord({
+  userId, // <--- ADD THIS
   modelId,
   modelName,
   symbol,
@@ -370,21 +372,27 @@ async function closeLiveGeminiPositionAndRecord({
 
   const closingAction = pos.side === 'LONG' ? 'SELL' : 'BUY';
 
+  // ✅ Now userId is correctly defined and will be inserted
   await db.query(
-    `INSERT INTO trades (model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      modelId,
-      modelName,
-      closingAction,
-      symbol.toUpperCase(),
-      exit,
-      qtyExecuted,
-      totalValue,
-      timestamp,
-    ]
+    `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [userId, modelId, modelName, closingAction, symbol.toUpperCase(), exit, qtyExecuted, totalValue, timestamp]
   );
 
+  // ✅ ADD THIS BLOCK HERE
+io.to(`user:${userId}`).emit('gemini_transaction', {
+  user_id: userId,
+  model_id: modelId,
+  model_name: modelName,
+  action: closingAction,
+  crypto_symbol: symbol.toUpperCase(),
+  crypto_price: exit,
+  quantity: qtyExecuted,
+  total_value: totalValue,
+  timestamp,
+});
+// ✅ END OF NEW CODE
+  
   const remaining = pos.amount - qtyExecuted;
 
   if (remaining <= 0.00000001) {
@@ -398,6 +406,19 @@ async function closeLiveGeminiPositionAndRecord({
       `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)}`
     );
   }
+
+  // ✅ Emit the transaction to the user's room for real-time table update
+  io.to(`user:${userId}`).emit('gemini_transaction', {
+    user_id: userId,
+    model_id: modelId,
+    model_name: modelName,
+    action: closingAction,
+    crypto_symbol: symbol.toUpperCase(),
+    crypto_price: exit,
+    quantity: qtyExecuted,
+    total_value: totalValue,
+    timestamp,
+  });
 
   io.emit('position_closed', {
     model_id: modelId,
@@ -1444,6 +1465,53 @@ app.get("/api/gemini/market-trades", async (req, res) => {
   }
 });
 
+// ✅ NEW ENDPOINT: Real Gemini transactions from DB
+app.get('/api/gemini/transactions', async (req, res) => {
+  try {
+    const { userId, limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+
+    /*const [rows] = await db.query(
+     `
+      SELECT
+        id,
+        user_id,
+        model_id,
+        model_name,
+        action,
+        crypto_symbol,
+        crypto_price,
+        quantity,
+        total_value,
+        created_at    -- ✅ CHANGED FROM timestamp TO created_at
+      FROM trades
+      WHERE user_id = ?
+      ORDER BY created_at DESC    -- ✅ CHANGED FROM timestamp TO created_at
+      LIMIT ?
+      `,
+      [userId, lim]
+    );*/
+
+    const query = `
+      SELECT 
+        id, model_name, action, crypto_symbol, crypto_price, quantity, created_at
+      FROM trades
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 20
+    `;
+
+    const [rows] = await db.query(query, [userId]);
+
+    return res.json({ success: true, transactions: rows });
+  } catch (err) {
+    console.error('❌ /api/gemini/transactions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch transactions' });
+  }
+});
+
 // GEMINI OPEN POSITIONS ENDPOINT
 app.get('/api/gemini/open-positions', (req, res) => {
   try {
@@ -1590,13 +1658,14 @@ app.post('/api/gemini/close-all', async (req, res) => {
         const exitPrice = parseFloat(order.avg_execution_price || order.price || '0');
 
         const closingInfo = await closeLiveGeminiPositionAndRecord({
+          userId: userId,  // ✅ ADD THIS LINE (userId is already available at the top of the function)
           modelId: pos.modelId,
           modelName: pos.modelName,
           symbol,
           amount: executed,
           exitPrice: exitPrice,
         });
-
+        
         results.push({
           modelId: pos.modelId,
           modelName: pos.modelName,
@@ -1943,6 +2012,22 @@ app.post("/api/gemini/order", async (req, res) => {
           side: 'LONG',
         });
         console.log(`✅ LONG position opened: ${modelName} ${symbol}, amount: ${executed}, price: ${actualPrice}`);
+        // ✅ ADD THIS BLOCK HERE
+        const totalValue = (actualPrice * executed).toFixed(2);
+        const timestamp = Date.now();
+        
+        io.to(`user:${req.body.userId}`).emit('gemini_transaction', {
+          user_id: req.body.userId,
+          model_id: modelId,
+          model_name: modelName,
+          action: 'BUY',
+          crypto_symbol: symbol.toUpperCase(),
+          crypto_price: actualPrice,
+          quantity: executed,
+          total_value: totalValue,
+          timestamp,
+        });
+        // ✅ END OF NEW CODE
       } else {
         console.warn(
           `⚠️ Buy order for ${symbol} not filled (is_live=${isLive}, executed=${executed}). LONG position NOT opened.`
@@ -1973,6 +2058,22 @@ app.post("/api/gemini/order", async (req, res) => {
           side: 'SHORT',
         });
         console.log(`✅ SHORT position opened: ${modelName} ${symbol}, amount: ${executed}, price: ${actualPrice}`);
+        // ✅ ADD THIS BLOCK HERE
+        const totalValue = (actualPrice * executed).toFixed(2);
+        const timestamp = Date.now();
+        
+        io.to(`user:${req.body.userId}`).emit('gemini_transaction', {
+          user_id: req.body.userId,
+          model_id: modelId,
+          model_name: modelName,
+          action: 'SELL',
+          crypto_symbol: symbol.toUpperCase(),
+          crypto_price: actualPrice,
+          quantity: executed,
+          total_value: totalValue,
+          timestamp,
+        });
+        // ✅ END OF NEW CODE
       } else {
         console.warn(
           `⚠️ Sell order for ${symbol} not filled (is_live=${isLive}, executed=${executed}). SHORT position NOT opened.`
@@ -1999,6 +2100,7 @@ app.post("/api/gemini/order", async (req, res) => {
         const exitPrice = parseFloat(order.avg_execution_price || order.price || price);
 
         closingInfo = await closeLiveGeminiPositionAndRecord({
+          userId: req.body.userId,  // ✅ ADD THIS LINE
           modelId,
           modelName,
           symbol,
@@ -2078,6 +2180,42 @@ app.post("/api/gemini/order", async (req, res) => {
         reason: 'network_error',
       });
     }
+  }
+});
+
+// ✅ NEW ENDPOINT: Real Gemini transactions from DB
+app.get('/api/gemini/transactions', async (req, res) => {
+  try {
+    const { userId, limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+
+    const [rows] = await db.query(
+      `
+      SELECT
+        id,
+        user_id,
+        model_id,
+        model_name,
+        action,
+        crypto_symbol,
+        crypto_price,
+        quantity,
+        total_value,
+        timestamp
+      FROM trades
+      WHERE user_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+      `,
+      [userId, lim]
+    );
+
+    return res.json({ success: true, transactions: rows });
+  } catch (err) {
+    console.error('❌ /api/gemini/transactions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch transactions' });
   }
 });
 
