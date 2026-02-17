@@ -1148,16 +1148,61 @@ function Dashboard() {
   const handleStopAllGeminiTrading = async () => {
     try {
       const userId = userInfo?.sub;
+      
+      if (!userId) {
+        addLog('❌ User ID not found. Please ensure you are logged in.', 'error');
+        return;
+      }
+
       addLog('🛑 Requesting stop for all live Gemini strategies...', 'warning');
 
-      const response = await axios.post('/api/gemini/stop-all', { userId });
+      const response = await axios.post('/api/gemini/close-all', { userId }, { timeout: 25000 });
 
       if (response.data.success) {
-        addLog('✅ All live strategies stopped', 'info');
+        const results = response.data.results || [];
+        const errors = response.data.errors || [];
+        
+        if (results.length > 0) {
+          addLog(`✅ Successfully closed ${results.length} position(s)`, 'success');
+          
+          // Log each closed position
+          results.forEach(result => {
+            addLog(
+              `✅ Closed ${result.modelName} ${result.symbol} ${result.side} - P&L: ${result.pnl?.toFixed(2) || 'N/A'}`,
+              'success'
+            );
+          });
+        } else {
+          addLog('ℹ️ No open positions found to close.', 'info');
+        }
+
+        if (errors.length > 0) {
+          addLog(`⚠️ ${errors.length} position(s) failed to close`, 'warning');
+          errors.forEach(err => {
+            addLog(`⚠️ ${err.modelName} ${err.symbol}: ${err.error}`, 'warning');
+          });
+        }
+
         setGeminiTradingStatuses({});
       }
     } catch (error) {
-      addLog(`❌ Error stopping strategies: ${error.message}`, 'error');
+      const errorMsg = error.response?.data?.error || error.message;
+      const errorReason = error.response?.data?.reason;
+      
+      // Handle specific error cases gracefully
+      if (error.response?.status === 400) {
+        if (errorReason === 'no_open_positions') {
+          addLog('ℹ️ No open positions found to close.', 'info');
+        } else if (errorReason === 'no_credentials') {
+          addLog('❌ Gemini credentials not found. Please connect Gemini first.', 'error');
+        } else {
+          addLog(`❌ Error stopping strategies: ${errorMsg}`, 'error');
+        }
+      } else if (error.code === 'ECONNABORTED') {
+        addLog('❌ Request timeout. The server took too long to respond.', 'error');
+      } else {
+        addLog(`❌ Error stopping strategies: ${errorMsg}`, 'error');
+      }
     }
   };
 
@@ -1239,6 +1284,8 @@ Continue?`
 
       const normalized = raw.map(tx => ({
         id: tx.id,
+        // 🤖 ADD THIS LINE to map model_name from DB to model for the table
+        model: tx.model_name || 'Manual',
         symbol: (tx.crypto_symbol || 'UNKNOWN').toUpperCase(),
         side: (tx.action || 'buy').toLowerCase(),
         price: Number(tx.crypto_price || 0),
@@ -1410,7 +1457,9 @@ Continue?`
     //socket.on('new_gemini_trade', onNewGeminiTrade);
     socket.on('gemini_transaction', (tx) => {
       const normalizedTx = {
-        id: tx.id,
+        id: tx.id || Date.now(),
+        // 🤖 Map model_name here as well
+        model: tx.model_name || 'Manual',
         symbol: (tx.crypto_symbol || tx.symbol || 'UNKNOWN').toUpperCase(),
         side: (tx.action || tx.side || 'buy').toLowerCase(),
         price: Number(tx.crypto_price || tx.price || 0),
@@ -1722,76 +1771,81 @@ Continue?`
 
       {/* Gemini Transactions Table */}
       {/* Place this after SystemLogs and before charts */}
-      {geminiTransactions.length > 0 && (
-        <div style={{
-          background: '#f0f4f8',
-          padding: '15px',
-          borderRadius: '8px',
-          marginTop: '20px',
-          marginBottom: '20px',
-          border: '1px solid #ccc',
-          overflowX: 'auto'
-        }}>
-          <h3 style={{ marginTop: 0, marginBottom: '10px' }}>Last 20 Gemini Transactions</h3>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-            <thead>
-              <tr style={{ backgroundColor: '#e2e8f0' }}>
-                <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>Symbol</th>
-                <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>Side</th>
-                <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'right' }}>Price</th>
-                <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'right' }}>Amount</th>
-                <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>Timestamp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {geminiTransactions.map((tx, idx) => {
-                // defensive parsing / fallbacks
-                const id = tx.id || tx.tid || tx.trade_id || `gemini_${idx}_${String(tx.timestamp || Date.now()).slice(-6)}`;
-                const symbol = (tx.symbol || tx.raw?.symbol || tx.raw?.pair || tx.raw?.crypto_symbol || 'UNKNOWN').toString().toUpperCase();
-                const side = (tx.side || tx.type || tx.action || tx.raw?.side || tx.raw?.type || 'buy').toString().toLowerCase();
-                const priceNum = Number(tx.price ?? tx.p ?? tx.raw?.price ?? tx.raw?.crypto_price ?? NaN);
-                const amountNum = Number(tx.amount ?? tx.size ?? tx.quantity ?? tx.raw?.amount ?? NaN);
-                const tsNum = tx.timestamp ?? tx.timestampms ?? tx.time ?? tx.created_at ?? tx.raw?.timestamp ?? Date.now();
-
-                const priceDisplay = Number.isFinite(priceNum)
-                  ? `$${priceNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                  : 'N/A';
-
-                const amountDisplay = Number.isFinite(amountNum)
-                  ? amountNum.toFixed(6)
-                  : 'N/A';
-
-                const timeDisplay = (() => {
-                  const d = new Date(tsNum);
-                  return isNaN(d.getTime()) ? 'N/A' : d.toLocaleString();
-                })();
-
-                const sideColor = side === 'buy' ? '#48bb78' : '#f56565';
-
+      {/* 💎 Real Gemini Transactions Table (Restored & Fixed) */}
+      <div style={{
+        background: '#fff',
+        padding: '20px',
+        borderRadius: '12px',
+        marginTop: '20px',
+        marginBottom: '20px',
+        border: '1px solid #e2e8f0',
+        boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
+        overflowX: 'auto'
+      }}>
+        <h3 style={{ marginTop: 0, marginBottom: '15px', fontSize: '18px', fontWeight: '600', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          💎 Last 20 Gemini Transactions
+        </h3>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+          <thead>
+            <tr style={{ backgroundColor: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
+              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Time</th>
+              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Model</th>
+              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Symbol</th>
+              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Type</th>
+              <th style={{ padding: '12px 8px', textAlign: 'right', color: '#64748b' }}>Price</th>
+              <th style={{ padding: '12px 8px', textAlign: 'right', color: '#64748b' }}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {geminiTransactions.length > 0 ? (
+              geminiTransactions.map((tx, idx) => {
+                const side = (tx.side || 'buy').toLowerCase();
+                const price = Number(tx.price || 0);
+                const amount = Number(tx.amount || 0);
+                
                 return (
-                  <tr key={id} style={{ backgroundColor: idx % 2 === 0 ? '#fff' : '#f9f9f9' }}>
-                    <td style={{ border: '1px solid #ccc', padding: '8px' }}>{symbol}</td>
-                    <td
-                      style={{
-                        border: '1px solid #ccc',
-                        padding: '8px',
-                        color: sideColor,
-                        fontWeight: 'bold'
-                      }}
-                    >
-                      {side.toUpperCase()}
+                  <tr key={tx.id || idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                    <td style={{ padding: '12px 8px', color: '#475569' }}>
+                      {new Date(tx.timestamp).toLocaleString()}
                     </td>
-                    <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'right' }}>{priceDisplay}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'right' }}>{amountDisplay}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '8px' }}>{timeDisplay}</td>
+                    <td style={{ padding: '12px 8px', fontWeight: '600', color: '#2563eb' }}>
+                      {tx.model || 'Manual'}
+                    </td>
+                    <td style={{ padding: '12px 8px', fontWeight: '500' }}>
+                      {tx.symbol}
+                    </td>
+                    <td style={{ padding: '12px 8px' }}>
+                      <span style={{
+                        padding: '4px 8px',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        backgroundColor: side === 'buy' ? '#dcfce7' : '#fee2e2',
+                        color: side === 'buy' ? '#166534' : '#991b1b'
+                      }}>
+                        {side.toUpperCase()}
+                      </span>
+                    </td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: '500' }}>
+                      ${price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    </td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                      {amount.toFixed(6)}
+                    </td>
                   </tr>
                 );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
+              })
+            ) : (
+              <tr>
+                <td colSpan="6" style={{ padding: '20px', textAlign: 'center', color: '#94a3b8' }}>
+                  Waiting for Gemini transaction data...
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      
       {isGeminiConnected && (
         <PositionsTable
           loadingPositions={loadingPositions}
@@ -1800,13 +1854,15 @@ Continue?`
         />
       )}
 
-      {isGeminiConnected && (
+      {isGeminiConnected && (                                                         
         <MarketTradesTable
           btcTrades={btcTrades}
           ethTrades={ethTrades}
           solTrades={solTrades}
-        />
+        />   
       )}
+
+      
 
       <div className="charts-container">
         <LiveMultiChart history={cryptoHistory} symbols={['BTCUSDT', 'ETHUSDT', 'SOLUSDT']} />
@@ -1818,11 +1874,7 @@ Continue?`
         />
       </div>
 
-      <TransactionsTable
-        loadingTrades={loadingTrades}
-        trades={geminiTransactions}  // ✅ Make sure this is geminiTransactions
-        formatTimestamp={formatTimestamp}
-      />
+      
     </div>
   );
 }

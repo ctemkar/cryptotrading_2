@@ -1590,12 +1590,18 @@ app.post('/api/gemini/close-all', async (req, res) => {
       : allPositions;
 
     if (!positionsToClose.length) {
-      return res.status(400).json({
+      /*return res.status(400).json({
         success: false,
         error: modelId
           ? `No open positions found for model ${modelId}`
           : 'No open positions found',
         reason: 'no_open_positions',
+      }); */
+      return res.json({
+        success: true,
+        message: 'No open positions to close.',
+        results: [],
+        errors: []
       });
     }
 
@@ -1634,6 +1640,9 @@ app.post('/api/gemini/close-all', async (req, res) => {
         );
 
         const order = await geminiRequest(finalApiKey, finalApiSecret, '/v1/order/new', orderPayload);
+
+        // 🔥 ADD THIS LINE RIGHT HERE 🔥
+        console.log("📦 ORDER RESPONSE:", JSON.stringify(order, null, 2));
 
         const executed = parseFloat(order.executed_amount || '0');
         const isLive = !!order.is_live;
@@ -2015,7 +2024,25 @@ app.post("/api/gemini/order", async (req, res) => {
         // ✅ ADD THIS BLOCK HERE
         const totalValue = (actualPrice * executed).toFixed(2);
         const timestamp = Date.now();
-        
+
+        // ✅ INSERT INTO DATABASE
+        await db.query(
+          `INSERT INTO trades 
+          (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            req.body.userId,
+            modelId,
+            modelName,
+            'BUY',
+            symbol.toUpperCase(),
+            actualPrice,
+            executed,
+            totalValue,
+            timestamp
+          ]
+        );
+              
         io.to(`user:${req.body.userId}`).emit('gemini_transaction', {
           user_id: req.body.userId,
           model_id: modelId,
@@ -2061,6 +2088,24 @@ app.post("/api/gemini/order", async (req, res) => {
         // ✅ ADD THIS BLOCK HERE
         const totalValue = (actualPrice * executed).toFixed(2);
         const timestamp = Date.now();
+
+        // ✅ INSERT INTO DATABASE
+        await db.query(
+          `INSERT INTO trades 
+          (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            req.body.userId,
+            modelId,
+            modelName,
+            'SELL',
+            symbol.toUpperCase(),
+            actualPrice,
+            executed,
+            totalValue,
+            timestamp
+          ]
+        );
         
         io.to(`user:${req.body.userId}`).emit('gemini_transaction', {
           user_id: req.body.userId,
@@ -2184,7 +2229,7 @@ app.post("/api/gemini/order", async (req, res) => {
 });
 
 // ✅ NEW ENDPOINT: Real Gemini transactions from DB
-app.get('/api/gemini/transactions', async (req, res) => {
+/*app.get('/api/gemini/transactions', async (req, res) => {
   try {
     const { userId, limit = 20 } = req.query;
     if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
@@ -2217,7 +2262,7 @@ app.get('/api/gemini/transactions', async (req, res) => {
     console.error('❌ /api/gemini/transactions error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch transactions' });
   }
-});
+}); */
 
 // ========================================
 // 3. SOCKET.IO CONNECTION HANDLING
