@@ -1,4 +1,8 @@
 // backend/server.js
+console.log('##########################################');
+console.log('##   SERVER STARTING - VERSION: 5.0     ##');
+console.log('##   TIMESTAMP: ' + new Date().toISOString() + '  ##');
+console.log('##########################################');
 require('dotenv').config();
 const express = require("express");
 const http = require("http");
@@ -221,6 +225,34 @@ function decrypt(enc, iv, authTag) {
 /* ------------------------------
    GEMINI API HELPER FUNCTIONS
 --------------------------------*/
+
+/**
+ * Normalize symbol to Gemini format (btcusd, ethusd, solusd)
+ */
+function normalizeSymbolForGemini(symbol) {
+  if (!symbol) return 'btcusd';
+  
+  const cleaned = symbol.toLowerCase().replace(/[^a-z]/g, '');
+
+  // Remove 'T' suffix from USDT variants
+  const normalized = cleaned.replace(/usdt$/i, 'usd');
+
+  // Validate against supported symbols
+  const supported = ['btcusd', 'ethusd', 'solusd'];
+  if (supported.includes(normalized)) {
+    return normalized;
+  }
+  
+  // Map common variants to Gemini format
+  // Fallback: try to match by prefix
+  if (normalized.includes('btc')) return 'btcusd';
+  if (normalized.includes('eth')) return 'ethusd';
+  if (normalized.includes('sol')) return 'solusd';
+  
+  return 'btcusd'; // default
+  
+}
+
 async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
   const env = payload.env === 'sandbox' ? 'sandbox' : 'live';
 
@@ -478,9 +510,9 @@ MODELS.forEach(m => {
    CRYPTO PRICES INITIAL STATE
 --------------------------------*/
 const CRYPTO_SYMBOLS = [
-  { symbol: "BTCUSDT", name: "Bitcoin", startPrice: 95000, volatility: 0.002 },
-  { symbol: "ETHUSDT", name: "Ethereum", startPrice: 3500, volatility: 0.003 },
-  { symbol: "SOLUSDT", name: "Solana", startPrice: 180, volatility: 0.004 }
+  { symbol: "BTCUSD", name: "Bitcoin", startPrice: 95000, volatility: 0.002 },
+  { symbol: "ETHUSD", name: "Ethereum", startPrice: 3500, volatility: 0.003 },
+  { symbol: "SOLUSD", name: "Solana", startPrice: 180, volatility: 0.004 }
 ];
 
 let cryptoPrices = {};
@@ -494,40 +526,49 @@ CRYPTO_SYMBOLS.forEach(c => {
 /* ----------------------------------------
    AUTO-GENERATE TRADES (SIMPLE STRATEGY)
 -----------------------------------------*/
-async function generateTrade(modelId, modelName) {
+async function generateTrade(userId, modelId, modelName, symbol) {
   try {
-    const crypto = CRYPTO_SYMBOLS[Math.floor(Math.random() * CRYPTO_SYMBOLS.length)];
-    const cryptoPrice = cryptoPrices[crypto.symbol];
+    // 1. Get Real Price
+    const price = await getGeminiPrice(symbol, 'live');
+    const action = Math.random() > 0.5 ? 'BUY' : 'SELL';
+    const quantity = (Math.random() * 0.01).toFixed(6);
+    const totalValue = (price * quantity).toFixed(2);
 
-    const action = Math.random() > 0.5 ? "BUY" : "SELL";
+    console.log(`🤖 [STRATEGY] ${modelName} decided to ${action} ${symbol}`);
 
-    const quantity = (Math.random() * 0.49 + 0.01).toFixed(4);
+    // 2. GET KEYS FOR REAL TRADE
+    const [rows] = await db.query('SELECT api_key, api_secret_enc, iv, auth_tag FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    
+    if (rows.length > 0) {
+      const apiSecret = decrypt(rows[0].api_secret_enc, rows[0].iv, rows[0].auth_tag);
+      
+      // 3. PLACE REAL LIMIT ORDER (To trigger Email)
+      const limitPrice = action === 'BUY' ? (price * 1.005).toFixed(2) : (price * 0.995).toFixed(2);
+      
+      const orderPayload = {
+        symbol: symbol.toLowerCase(),
+        amount: quantity.toString(),
+        side: action.toLowerCase(),
+        type: 'exchange limit',
+        price: limitPrice,
+        client_order_id: `auto_${modelId}_${Date.now()}`
+      };
 
-    const totalValue = (cryptoPrice * quantity).toFixed(2);
+      console.log('📤 [AUTOMATED] Sending Real Order to Gemini...');
+      await geminiRequest(rows[0].api_key, apiSecret, "/v1/order/new", { ...orderPayload, env: 'live' });
+    }
 
+    // 4. Save to DB so it shows in your table
     const timestamp = Date.now();
-
     await db.query(
-      `INSERT INTO trades (model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [modelId, modelName, action, crypto.symbol, cryptoPrice, quantity, totalValue, timestamp]
+      `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, modelId, modelName, action, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
     );
 
-    console.log(`📊 TRADE: ${modelName} ${action} ${quantity} ${crypto.symbol} @ $${cryptoPrice}`);
-
-    io.emit("new_trade", {
-      model_id: modelId,
-      model_name: modelName,
-      action,
-      crypto_symbol: crypto.symbol,
-      crypto_price: cryptoPrice,
-      quantity,
-      total_value: totalValue,
-      timestamp
-    });
-
+    return { modelName, action, symbol, price, quantity, timestamp };
   } catch (error) {
-    console.error("Error generating trade:", error.message);
+    console.error('❌ Automated Trade Failed:', error.message);
   }
 }
 
@@ -629,7 +670,7 @@ function startUpdateInterval() {
   console.log(`Update interval set to ${UPDATE_INTERVAL}ms`);
 }
 
-function startTradeGeneration() {
+/*function startTradeGeneration() {
   if (tradeIntervalId) {
     clearInterval(tradeIntervalId);
   }
@@ -640,7 +681,30 @@ function startTradeGeneration() {
   }, 7000);
 
   console.log("✅ Auto-trade generation started");
-}
+} */
+
+function startTradeGeneration() {
+  if (tradeIntervalId) {
+    clearInterval(tradeIntervalId);
+  }
+
+  // YOUR ACTUAL USER ID FROM THE LOGS
+  const MY_USER_ID = '114079031009411052320'; 
+
+  tradeIntervalId = setInterval(async () => {
+    const randomModel = MODELS[Math.floor(Math.random() * MODELS.length)];
+    const symbols = ['BTCUSD', 'ETHUSD', 'SOLUSD'];
+    const randomSymbol = symbols[Math.floor(Math.random() * symbols.length)];
+
+    console.log(`🎲 [SCHEDULER] Triggering trade for ${randomModel.name} on ${randomSymbol}`);
+    
+    // FIX: Pass the User ID first!
+    await generateTrade(MY_USER_ID, randomModel.id, randomModel.name, randomSymbol);
+    
+  }, 30000); // I changed this to 30 seconds so you don't get banned by Gemini for spamming
+
+  console.log("✅ Real Gemini Auto-trade generation started for User:", MY_USER_ID);
+}  
 
 function startGeminiTradesPolling() {
   if (geminiTradesIntervalId) {
@@ -902,13 +966,13 @@ app.post('/api/gemini/start-trading', async (req, res) => {
 
     // Mock Trade Logic
     const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
-    const entryPrice = cryptoPrices['BTCUSDT'] || 50000;
+    const entryPrice = cryptoPrices['BTCUSD'] || 50000;
     const quantity = (parseFloat(startValue) / entryPrice).toFixed(6);
     
     await db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, side, 'BTCUSDT', entryPrice, quantity, startValue, now]
+      [userId, modelId, modelName, side, 'BTCUSD', entryPrice, quantity, startValue, now]
     );
 
     if (io) {
@@ -1494,9 +1558,25 @@ app.get('/api/gemini/transactions', async (req, res) => {
       [userId, lim]
     );*/
 
-    const query = `
+    /*const query = `
       SELECT 
         id, model_name, action, crypto_symbol, crypto_price, quantity, created_at
+      FROM trades
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 20
+    `;*/
+
+    const query = `
+      SELECT 
+        id, 
+        model_name, 
+        action, 
+        crypto_symbol, 
+        crypto_price, 
+        quantity, 
+        (crypto_price * quantity) as total_value, -- Add this!
+        created_at as timestamp -- Alias this to timestamp for the frontend
       FROM trades
       WHERE user_id = ?
       ORDER BY created_at DESC
@@ -1759,6 +1839,13 @@ app.post('/api/gemini/clear-positions', (req, res) => {
 
 // GEMINI ORDER ENDPOINT (WITH FIXED ORDER TYPE NORMALIZATION)
 app.post("/api/gemini/order", async (req, res) => {
+  // BIG LOUD LOGS
+  console.log('\n\n*****************************************');
+  console.log('🚨🚨🚨 MANUAL TRADE ENDPOINT TRIGGERED 🚨🚨🚨');
+  console.log('*****************************************\n\n');
+  console.log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+  console.log("!!! TRIGGERED: /api/gemini/order ENDPOINT !!!");
+  console.log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
   try {
     console.log('📥 /api/gemini/order RAW body:', req.body);
 
@@ -1807,7 +1894,7 @@ app.post("/api/gemini/order", async (req, res) => {
     }
 
     const {
-      symbol,
+      symbol: rawSymbol,
       side,
       amount,
       price,
@@ -1816,6 +1903,10 @@ app.post("/api/gemini/order", async (req, res) => {
       modelName,
       closePosition,
     } = req.body;
+
+    // ✅ Normalize symbol to Gemini format
+    const symbol = normalizeSymbolForGemini(rawSymbol);
+    console.log(`🔄 Symbol normalized: ${rawSymbol} → ${symbol}`);
 
     const isClosing = (closePosition === true || closePosition === 'true');
 
@@ -1943,52 +2034,60 @@ app.post("/api/gemini/order", async (req, res) => {
       ` (model: ${modelName || 'N/A'}, close=${isClosing})`
     );
 
+    // 🔥 NEW: Get current market price to create a "marketable limit order"
+    let marketPrice = parseFloat(price);
+
+    // If no price provided, fetch current market price from Gemini
+    if (!marketPrice || marketPrice <= 0) {
+      try {
+        const tickerUrl = `https://api.gemini.com/v1/pubticker/${symbol.toLowerCase()}`;
+        const tickerResp = await axios.get(tickerUrl);
+        marketPrice = parseFloat(tickerResp.data.last);
+        console.log(`📊 Fetched current market price for ${symbol}: $${marketPrice}`);
+      } catch (err) {
+        console.error('❌ Failed to fetch market price:', err.message);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to fetch current market price for limit order'
+        });
+      }
+    }
+
+    // 🔥 Calculate a "marketable" limit price (guaranteed to fill + triggers emails)
+    const isBuy = side.toLowerCase() === 'buy';
+    const limitPrice = isBuy 
+      ? (marketPrice * 1.005).toFixed(2)  // Buy 0.5% above market (guaranteed fill)
+      : (marketPrice * 0.995).toFixed(2); // Sell 0.5% below market (guaranteed fill)
+
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: amount.toString(),
       side: side.toLowerCase(),
+      type: 'exchange limit', // 👈 THIS IS THE KEY CHANGE
+      price: limitPrice,      // 👈 THIS TRIGGERS THE EMAILS
+      client_order_id: `trade_${modelId || 'manual'}_${Date.now()}`
     };
 
-    if (isClosing) {
-      const t = await getGeminiTicker(symbol, effectiveEnv);
+    console.log(`📤 Sending ${side.toUpperCase()} limit order to Gemini:`, {
+      symbol: orderPayload.symbol,
+      side: orderPayload.side,
+      amount: orderPayload.amount,
+      type: orderPayload.type,
+      price: orderPayload.price,
+      marketPrice: marketPrice,
+      spread: isBuy ? '+0.5%' : '-0.5%'
+    });
 
-      const isSell = side.toLowerCase() === 'sell';
-      const basePx = isSell ? (t.bid || t.last) : (t.ask || t.last);
-
-      if (!basePx || basePx <= 0) {
-        throw new Error(`No valid ticker price for ${symbol} (${effectiveEnv})`);
-      }
-
-      const px = isSell ? basePx * 0.97 : basePx * 1.03;
-
-      orderPayload.type = 'exchange limit';
-      orderPayload.price = toUsdPrice2(px);
-      orderPayload.options = ['immediate-or-cancel'];
-
-      console.log(
-        `🔻 Using IOC LIMIT to close position (${isSell ? 'SELL' : 'BUY'}) @ ${orderPayload.price} (bid=${t.bid}, ask=${t.ask}, last=${t.last})`
-      );
-    } else {
-      orderPayload.type = normalizedOpenType;
-
-      if (orderPayload.type === 'exchange limit') {
-        const numericPrice = Number(price);
-        if (!numericPrice || numericPrice <= 0) {
-          throw new Error(`Price is required for limit orders and must be positive (got: ${price})`);
-        }
-        orderPayload.price = numericPrice.toString();
-        console.log(`🔺 Using LIMIT order to open position (price: ${numericPrice})`);
-      } else {
-        console.log(`🔺 Using MARKET order to open position (${orderPayload.type})`);
-      }
-    }
-
-    console.log('📤 Sending to Gemini:', orderPayload);
+    // 1. Add this right BEFORE the request
+    console.log('DEBUG: Sending Payload to Gemini:', JSON.stringify(orderPayload, null, 2));
 
     const order = await geminiRequest(effectiveApiKey, effectiveApiSecret, "/v1/order/new", {
       ...orderPayload,
       env: effectiveEnv,
     });
+
+    // 2. Add this right AFTER the request
+    console.log('DEBUG: Gemini Raw Response:', JSON.stringify(order, null, 2));
 
     console.log(`✅ [${effectiveEnv.toUpperCase()}] Order placed:`, {
       order_id: order.order_id,

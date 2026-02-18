@@ -117,7 +117,7 @@ function Dashboard() {
     ? Number(appState.tradingSession.startValue)
     : (parseFloat(startingValue) || 100);
   const safeStartValue = Number.isFinite(startValue) && startValue > 0 ? startValue : 100;
-  const currentPrice = cryptoLatest.BTCUSDT || null;
+  const currentPrice = cryptoLatest.BTCUSD || null;
   const stopLossRef = useRef(parseFloat(stopLoss) || 2.0);
   const profitTargetRef = useRef(parseFloat(profitTarget) || 5.0);
   const isSyncingFromServer = useRef(false);
@@ -516,11 +516,11 @@ function Dashboard() {
   const getCurrentPrice = (symbol) => {
     const sym = symbol.toLowerCase();
     if (sym === 'btcusd') {
-      return cryptoLatest.BTCUSDT;
+      return cryptoLatest.BTCUSD;
     } else if (sym === 'ethusd') {
-      return cryptoLatest.ETHUSDT;
+      return cryptoLatest.ETHUSD;
     } else if (sym === 'solusd') {
-      return cryptoLatest.SOLUSDT;
+      return cryptoLatest.SOLUSD;
     }
     return null;
   };
@@ -1286,12 +1286,12 @@ Continue?`
         id: tx.id,
         // 🤖 ADD THIS LINE to map model_name from DB to model for the table
         model: tx.model_name || 'Manual',
-        symbol: (tx.crypto_symbol || 'UNKNOWN').toUpperCase(),
-        side: (tx.action || 'buy').toLowerCase(),
-        price: Number(tx.crypto_price || 0),
-        amount: Number(tx.quantity || 0),
-        // 🕒 FIX: Map 'created_at' from your DB to 'timestamp'
-        timestamp: tx.created_at 
+        crypto_symbol: (tx.crypto_symbol || 'UNKNOWN').toUpperCase(),
+        action: (tx.action || 'buy').toLowerCase(),
+        crypto_price: Number(tx.crypto_price || 0),
+        quantity: Number(tx.quantity || 0),
+        total_value: Number(tx.total_value || (tx.crypto_price * tx.quantity) || 0),
+        timestamp: tx.timestamp || tx.created_at 
       }));
 
       setGeminiTransactions(normalized);
@@ -1602,7 +1602,9 @@ Continue?`
     />;
   }
 
+  //console.log('geminiTransactions:', geminiTransactions);
   console.log('geminiTransactions:', geminiTransactions);
+  console.log('geminiTransactions length:', geminiTransactions.length);
 
   return (
     <div className="dashboard" style={{ minHeight: '100vh', paddingBottom: '40px' }}>
@@ -1772,79 +1774,6 @@ Continue?`
       {/* Gemini Transactions Table */}
       {/* Place this after SystemLogs and before charts */}
       {/* 💎 Real Gemini Transactions Table (Restored & Fixed) */}
-      <div style={{
-        background: '#fff',
-        padding: '20px',
-        borderRadius: '12px',
-        marginTop: '20px',
-        marginBottom: '20px',
-        border: '1px solid #e2e8f0',
-        boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
-        overflowX: 'auto'
-      }}>
-        <h3 style={{ marginTop: 0, marginBottom: '15px', fontSize: '18px', fontWeight: '600', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          💎 Last 20 Gemini Transactions
-        </h3>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-          <thead>
-            <tr style={{ backgroundColor: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
-              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Time</th>
-              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Model</th>
-              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Symbol</th>
-              <th style={{ padding: '12px 8px', textAlign: 'left', color: '#64748b' }}>Type</th>
-              <th style={{ padding: '12px 8px', textAlign: 'right', color: '#64748b' }}>Price</th>
-              <th style={{ padding: '12px 8px', textAlign: 'right', color: '#64748b' }}>Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {geminiTransactions.length > 0 ? (
-              geminiTransactions.map((tx, idx) => {
-                const side = (tx.side || 'buy').toLowerCase();
-                const price = Number(tx.price || 0);
-                const amount = Number(tx.amount || 0);
-                
-                return (
-                  <tr key={tx.id || idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                    <td style={{ padding: '12px 8px', color: '#475569' }}>
-                      {new Date(tx.timestamp).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '12px 8px', fontWeight: '600', color: '#2563eb' }}>
-                      {tx.model || 'Manual'}
-                    </td>
-                    <td style={{ padding: '12px 8px', fontWeight: '500' }}>
-                      {tx.symbol}
-                    </td>
-                    <td style={{ padding: '12px 8px' }}>
-                      <span style={{
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        fontWeight: 'bold',
-                        backgroundColor: side === 'buy' ? '#dcfce7' : '#fee2e2',
-                        color: side === 'buy' ? '#166534' : '#991b1b'
-                      }}>
-                        {side.toUpperCase()}
-                      </span>
-                    </td>
-                    <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: '500' }}>
-                      ${price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </td>
-                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>
-                      {amount.toFixed(6)}
-                    </td>
-                  </tr>
-                );
-              })
-            ) : (
-              <tr>
-                <td colSpan="6" style={{ padding: '20px', textAlign: 'center', color: '#94a3b8' }}>
-                  Waiting for Gemini transaction data...
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
       
       {isGeminiConnected && (
         <PositionsTable
@@ -1862,10 +1791,18 @@ Continue?`
         />   
       )}
 
+      {isGeminiConnected && (
+        <TransactionsTable 
+          trades={geminiTransactions}
+          loadingTrades={false}
+          formatTimestamp={formatTimestamp}
+        />
+      )}
+
       
 
       <div className="charts-container">
-        <LiveMultiChart history={cryptoHistory} symbols={['BTCUSDT', 'ETHUSDT', 'SOLUSDT']} />
+        <LiveMultiChart history={cryptoHistory} symbols={['BTCUSD', 'ETHUSD', 'SOLUSD']} />
         <ModelsComparisonChart
           modelsHistory={modelsHistory}
           selectedModels={selectedModels}
