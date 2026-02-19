@@ -14,6 +14,8 @@ const axios = require("axios");
 
 const app = express();
 
+const activeTradeIntervals = new Map();
+
 // ========================================
 // 1. MIDDLEWARE (FIRST)
 // ========================================
@@ -526,6 +528,61 @@ CRYPTO_SYMBOLS.forEach(c => {
 /* ----------------------------------------
    AUTO-GENERATE TRADES (SIMPLE STRATEGY)
 -----------------------------------------*/
+async function executeRealGeminiTrade(userId, modelId, modelName, symbol, action, amountUSD) {
+  try {
+    console.log(`🚀 [REAL TRADE] ${modelName} is executing ${action} on ${symbol}`);
+
+    // 1. Get Keys
+    const [rows] = await db.query('SELECT api_key, api_secret_enc, iv, auth_tag FROM user_gemini_credentials WHERE user_id = ?', [userId]);
+    if (!rows.length) throw new Error("No API keys found for user");
+
+    const apiSecret = decrypt(rows[0].api_secret_enc, rows[0].iv, rows[0].auth_tag);
+    const price = await getGeminiPrice(symbol, 'live');
+    const quantity = (amountUSD / price).toFixed(6);
+
+    // 2. Marketable Limit Order (The Email Trigger)
+    const limitPrice = action.toUpperCase() === 'BUY' ? (price * 1.005).toFixed(2) : (price * 0.995).toFixed(2);
+
+    const orderPayload = {
+      symbol: symbol.toLowerCase(),
+      amount: quantity.toString(),
+      side: action.toLowerCase(),
+      type: 'exchange limit',
+      price: limitPrice,
+      client_order_id: `live_${modelId}_${Date.now()}`
+    };
+
+    console.log('📤 Sending to Gemini API...');
+    const geminiResponse = await geminiRequest(rows[0].api_key, apiSecret, "/v1/order/new", { ...orderPayload, env: 'live' });
+
+    // 3. Save to DB
+    const timestamp = Date.now();
+    await db.query(
+      `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, modelId, modelName, action.toUpperCase(), symbol.toUpperCase(), price, quantity, amountUSD, timestamp]
+    );
+
+    // 4. Emit to frontend
+    io.to(`user:${userId}`).emit('gemini_transaction', {
+      user_id: userId,
+      model_id: modelId,
+      model_name: modelName,
+      action: action.toUpperCase(),
+      crypto_symbol: symbol.toUpperCase(),
+      crypto_price: price,
+      quantity: quantity,
+      total_value: amountUSD,
+      timestamp,
+    });
+
+    return geminiResponse;
+  } catch (err) {
+    console.error('❌ REAL TRADE FAILED:', err.message);
+    throw err;
+  }
+}
+
 async function generateTrade(userId, modelId, modelName, symbol) {
   try {
     // 1. Get Real Price
@@ -683,7 +740,7 @@ function startUpdateInterval() {
   console.log("✅ Auto-trade generation started");
 } */
 
-function startTradeGeneration() {
+/*function startTradeGeneration() {
   if (tradeIntervalId) {
     clearInterval(tradeIntervalId);
   }
@@ -704,6 +761,38 @@ function startTradeGeneration() {
   }, 30000); // I changed this to 30 seconds so you don't get banned by Gemini for spamming
 
   console.log("✅ Real Gemini Auto-trade generation started for User:", MY_USER_ID);
+} */
+
+function startTradeGenerationForUser(userId) {
+  // Clear existing interval for this user if already running
+  if (activeTradeIntervals.has(userId)) {
+    clearInterval(activeTradeIntervals.get(userId));
+  }
+
+  const intervalId = setInterval(async () => {
+    try {
+      const randomModel = MODELS[Math.floor(Math.random() * MODELS.length)];
+      const symbols = ['BTCUSD', 'ETHUSD', 'SOLUSD'];
+      const randomSymbol = symbols[Math.floor(Math.random() * symbols.length)];
+
+      console.log(`🎲 [SCHEDULER] ${userId} → ${randomModel.name} → ${randomSymbol}`);
+
+      await generateTrade(userId, randomModel.id, randomModel.name, randomSymbol);
+    } catch (err) {
+      console.error(`❌ Scheduler error for user ${userId}:`, err.message);
+    }
+  }, 30000);
+
+  activeTradeIntervals.set(userId, intervalId);
+  console.log(`✅ Auto-trade scheduler started for user: ${userId}`);
+}
+
+function stopTradeGenerationForUser(userId) {
+  if (activeTradeIntervals.has(userId)) {
+    clearInterval(activeTradeIntervals.get(userId));
+    activeTradeIntervals.delete(userId);
+    console.log(`🛑 Scheduler stopped for user: ${userId}`);
+  }
 }  
 
 function startGeminiTradesPolling() {
@@ -958,7 +1047,7 @@ app.post('/api/gemini/start-trading', async (req, res) => {
       [userId, sessionJson, sessionJson]
     );
 
-    // Log start - FIXED: 4 placeholders for 4 columns + NOW()
+    // Log start
     await db.query(
       'INSERT INTO trade_logs_archive (user_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, NOW())',
       [userId, `Started trading: ${modelName}`, 'info', sessionJson]
@@ -968,7 +1057,7 @@ app.post('/api/gemini/start-trading', async (req, res) => {
     const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
     const entryPrice = cryptoPrices['BTCUSD'] || 50000;
     const quantity = (parseFloat(startValue) / entryPrice).toFixed(6);
-    
+
     await db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -976,12 +1065,43 @@ app.post('/api/gemini/start-trading', async (req, res) => {
     );
 
     if (io) {
-      io.to(`user:${userId}`).emit('log_entry', { message: `Model ${modelName} executed ${side} @ ${entryPrice}`, type: 'trade', time: now });
+      io.to(`user:${userId}`).emit('log_entry', {
+        message: `Model ${modelName} executed ${side} @ ${entryPrice}`,
+        type: 'trade',
+        time: now
+      });
+    }
+
+    // ✅ START REAL PER-USER GEMINI SCHEDULER (only if NOT mock trading)
+    if (!isMockTrading) {
+      startTradeGenerationForUser(userId);
+      console.log(`🚀 Real Gemini scheduler started for user: ${userId}`);
+    } else {
+      console.log(`🧪 Mock trading mode — scheduler not started for user: ${userId}`);
     }
 
     res.json({ success: true, message: 'Trading started' });
   } catch (err) {
     console.error('ERROR:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/gemini/execute-strategy-trade', async (req, res) => {
+  try {
+    const { userId, modelId, modelName, symbol, action, amountUSD } = req.body;
+
+    if (!userId || !modelId || !modelName || !symbol || !action) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    console.log(`🎯 [STRATEGY] ${modelName} wants to ${action} ${symbol}`);
+
+    const result = await executeRealGeminiTrade(userId, modelId, modelName, symbol, action, amountUSD || 10);
+
+    res.json({ success: true, order: result });
+  } catch (err) {
+    console.error('❌ Strategy trade failed:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1664,19 +1784,18 @@ app.post('/api/gemini/close-all', async (req, res) => {
       });
     }
 
+    // ✅ STEP 3: Stop the per-user Gemini scheduler when closing all positions
+    if (userId) {
+      stopTradeGenerationForUser(userId);
+      console.log(`🛑 Auto-trade scheduler stopped for user: ${userId}`);
+    }
+
     const allPositions = Object.values(liveGeminiPositions);
     const positionsToClose = modelId
       ? allPositions.filter(p => p.modelId === modelId)
       : allPositions;
 
     if (!positionsToClose.length) {
-      /*return res.status(400).json({
-        success: false,
-        error: modelId
-          ? `No open positions found for model ${modelId}`
-          : 'No open positions found',
-        reason: 'no_open_positions',
-      }); */
       return res.json({
         success: true,
         message: 'No open positions to close.',
@@ -1721,7 +1840,6 @@ app.post('/api/gemini/close-all', async (req, res) => {
 
         const order = await geminiRequest(finalApiKey, finalApiSecret, '/v1/order/new', orderPayload);
 
-        // 🔥 ADD THIS LINE RIGHT HERE 🔥
         console.log("📦 ORDER RESPONSE:", JSON.stringify(order, null, 2));
 
         const executed = parseFloat(order.executed_amount || '0');
@@ -1747,14 +1865,14 @@ app.post('/api/gemini/close-all', async (req, res) => {
         const exitPrice = parseFloat(order.avg_execution_price || order.price || '0');
 
         const closingInfo = await closeLiveGeminiPositionAndRecord({
-          userId: userId,  // ✅ ADD THIS LINE (userId is already available at the top of the function)
+          userId: userId,
           modelId: pos.modelId,
           modelName: pos.modelName,
           symbol,
           amount: executed,
           exitPrice: exitPrice,
         });
-        
+
         results.push({
           modelId: pos.modelId,
           modelName: pos.modelName,

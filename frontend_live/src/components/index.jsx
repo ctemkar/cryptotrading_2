@@ -846,69 +846,51 @@ function Dashboard() {
     }
 
     if (isGeminiConnected) {
-      addLog('🔗 Gemini is connected. Initializing model strategies...', 'info');
-
-      // Track open positions for profit/loss calculation
-      const openPositions = {};
+      addLog('🔗 Gemini is connected. Executing real trades...', 'info');
 
       for (const modelId of selectedModels) {
         const modelObj = availableModels.find(m => m.id === modelId);
-
-        if (modelObj) {
-          console.log(`🎯 Triggering trade for: ${modelObj.name} (ID: ${modelObj.id})`);
-
-          // Log model decision
-          const action = Math.random() > 0.5 ? 'Buy' : 'Sell'; // Simulate decision
-          const symbol = modelObj.symbol || 'BTCUSD';
-          addLog(`${modelObj.name} has decided to ${action} ${symbol}`, 'info');
-
-          try {
-            // Assuming you have a function handleStartGeminiTrading
-            const tradeResult = await handleStartGeminiTrading(modelObj);
-
-            // Log execution
-            const price = getCurrentPrice(symbol) || 0;
-            addLog(`${modelObj.name} has ${action.toLowerCase()}ed ${symbol} at $${(price || 0).toFixed(2)}`, 'success');
-
-            // Store open position for tracking
-            if (action === 'Buy') {
-              openPositions[modelId] = {
-                symbol,
-                entryPrice: price,
-                modelObj
-              };
-            }
-
-            // Simulate closing a position after some time (store timeout id)
-            const tid = setTimeout(async () => {
-              if (openPositions[modelId]) {
-                const { symbol, entryPrice, modelObj } = openPositions[modelId];
-                const exitPrice = getCurrentPrice(symbol) || 0;
-                const profitLoss = exitPrice - entryPrice;
-                const actionType = profitLoss >= 0 ? 'Profit' : 'Loss';
-
-                addLog(`${modelObj.name} closed the trade by Selling ${symbol} at $${(exitPrice || 0).toFixed(2)}. ${actionType}: $${Math.abs(profitLoss).toFixed(2)}`, 'success');
-
-                // Remove from open positions
-                delete openPositions[modelId];
-              }
-            }, 10000); // Close after 10 seconds for demo
-
-            // push tid to ref so Stop Trading can clear it
-            tradeTimeoutsRef.current.push(tid);
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          } catch (error) {
-            console.error(`❌ Error starting trade for ${modelObj.name}:`, error);
-            addLog(`❌ Failed to start ${modelObj.name}: ${error.message}`, 'error');
-          }
-        } else {
-          console.warn(`⚠️ Model ID ${modelId} not found in availableModels array`);
+        if (!modelObj) {
           addLog(`⚠️ Model ${modelId} not found`, 'warning');
+          continue;
         }
+
+        const executeStrategy = async () => {
+          try {
+            const action = Math.random() > 0.5 ? 'BUY' : 'SELL';
+            const symbol = 'BTCUSD';
+
+            addLog(`🤖 ${modelObj.name} executing ${action} on ${symbol}...`, 'info');
+
+            const response = await axios.post('/api/gemini/execute-strategy-trade', {
+              userId: userInfo.sub,
+              modelId: modelObj.id,
+              modelName: modelObj.name,
+              symbol: symbol,
+              action: action,
+              amountUSD: 10
+            });
+
+            if (response.data.success) {
+              addLog(`✅ Real trade executed for ${modelObj.name}`, 'success');
+              fetchGeminiTransactions();
+            } else {
+              addLog(`❌ Trade rejected for ${modelObj.name}: ${response.data.error}`, 'error');
+            }
+          } catch (err) {
+            addLog(`❌ Trade failed for ${modelObj.name}: ${err.message}`, 'error');
+          }
+        };
+
+        // Execute immediately on start
+        await executeStrategy();
+
+        // Keep trading every 5 minutes
+        const strategyInterval = setInterval(executeStrategy, 60000 * 5);
+        tradeTimeoutsRef.current.push(strategyInterval);
       }
 
-      addLog('✅ All models initialized', 'success');
+      addLog('✅ All models initialized with real Gemini trading', 'success');
     } else {
       addLog('⚠️ Gemini not connected. Trading in simulator mode only.', 'warning');
     }
@@ -964,7 +946,10 @@ function Dashboard() {
     // Clear any pending simulated trade timers (if you keep them in a ref)
     try {
       if (tradeTimeoutsRef?.current && tradeTimeoutsRef.current.length) {
-        tradeTimeoutsRef.current.forEach((tid) => clearTimeout(tid));
+        tradeTimeoutsRef.current.forEach((tid) => {
+          clearTimeout(tid);
+          clearInterval(tid); // Also clear strategy intervals
+        });
         tradeTimeoutsRef.current = [];
         if (typeof addLog === "function") addLog("Cleared pending trade timers", "info");
         console.log("Cleared pending trade timers");
@@ -1458,16 +1443,17 @@ Continue?`
     socket.on('gemini_transaction', (tx) => {
       const normalizedTx = {
         id: tx.id || Date.now(),
-        // 🤖 Map model_name here as well
         model: tx.model_name || 'Manual',
         symbol: (tx.crypto_symbol || tx.symbol || 'UNKNOWN').toUpperCase(),
         side: (tx.action || tx.side || 'buy').toLowerCase(),
         price: Number(tx.crypto_price || tx.price || 0),
         amount: Number(tx.quantity || tx.amount || 0),
-        // 🕒 Use created_at from the socket payload
-        timestamp: tx.created_at || new Date().toISOString() 
+        total_value: Number(tx.total_value || 0),
+        timestamp: tx.created_at || tx.timestamp || new Date().toISOString()
       };
       setGeminiTransactions(prev => [normalizedTx, ...prev].slice(0, 20));
+      addLog(`💎 Gemini Trade: ${normalizedTx.side.toUpperCase()} ${normalizedTx.symbol} @ $${normalizedTx.price.toFixed(2)}`, 'success');
+      fetchGeminiTransactions(); // Refresh table from DB
     });
     //socket.on('trades_update', onTradesUpdate);
     //socket.on('market_trades', onMarketTrades);
