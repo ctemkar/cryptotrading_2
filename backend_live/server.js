@@ -602,13 +602,36 @@ async function generateTrade(userId, modelId, modelName, symbol) {
       // 3. PLACE REAL LIMIT ORDER (To trigger Email)
       const limitPrice = action === 'BUY' ? (price * 1.005).toFixed(2) : (price * 0.995).toFixed(2);
       
+      // ✅ Check balance before placing order
+      const balances = await geminiRequest(rows[0].api_key, apiSecret, '/v1/balances', { env: 'live' });
+
+      const cryptoCurrency = symbol.replace('USD', ''); // e.g. 'BTC' from 'BTCUSD'
+      const usdBalance = parseFloat(balances.find(b => b.currency === 'USD')?.available || '0');
+      const cryptoBalance = parseFloat(balances.find(b => b.currency === cryptoCurrency)?.available || '0');
+
+      // If SELL but not enough crypto → switch to BUY
+      // If BUY but not enough USD → switch to SELL
+      let finalAction = action;
+      if (action === 'SELL' && cryptoBalance < parseFloat(quantity)) {
+        console.log(`⚠️ Not enough ${cryptoCurrency} to SELL. Switching to BUY.`);
+        finalAction = 'BUY';
+      }
+      if (action === 'BUY' && usdBalance < parseFloat(totalValue)) {
+        console.log(`⚠️ Not enough USD to BUY. Switching to SELL.`);
+        finalAction = 'SELL';
+      }
+
+      const finalLimitPrice = finalAction === 'BUY'
+        ? (price * 1.005).toFixed(2)
+        : (price * 0.995).toFixed(2);
+
       const orderPayload = {
         symbol: symbol.toLowerCase(),
         amount: quantity.toString(),
-        side: action.toLowerCase(),
+        side: finalAction.toLowerCase(),
         type: 'exchange limit',
-        price: limitPrice,
-        client_order_id: `auto_${modelId}_${Date.now()}`
+        price: finalLimitPrice,
+        client_order_id: `live_${modelId}_${Date.now()}`
       };
 
       console.log('📤 [AUTOMATED] Sending Real Order to Gemini...');
@@ -620,7 +643,7 @@ async function generateTrade(userId, modelId, modelName, symbol) {
     await db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, action, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
+      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
     );
 
     return { modelName, action, symbol, price, quantity, timestamp };
@@ -1101,8 +1124,10 @@ app.post('/api/gemini/execute-strategy-trade', async (req, res) => {
 
     res.json({ success: true, order: result });
   } catch (err) {
-    console.error('❌ Strategy trade failed:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('❌ Strategy Trade Failed:', err.response?.data || err.message);
+    // Send the actual Gemini reason back to the frontend
+    const errorMessage = err.response?.data?.message || err.message;
+    res.status(500).json({ success: false, error: errorMessage });
   }
 });
 
