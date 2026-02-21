@@ -270,16 +270,25 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
 
   const requestPayload = {
     request: path,
-    nonce,
-    ...restPayload,
-  };
+    nonce: Date.now().toString(),
+};
 
-  if (path === '/v1/balances') {
-    requestPayload.account = requestPayload.account || 'primary';
-  }
-  if (path === '/v1/order/new') {
-    requestPayload.account = requestPayload.account || 'primary';
-  }
+// Only copy specific allowed fields to avoid sending 'env' or other junk to Gemini
+if (payload.symbol) requestPayload.symbol = payload.symbol;
+if (payload.amount) requestPayload.amount = payload.amount;
+if (payload.price) requestPayload.price = payload.price;
+if (payload.side) requestPayload.side = payload.side;
+if (payload.type) requestPayload.type = payload.type;
+if (payload.client_order_id) requestPayload.client_order_id = payload.client_order_id;
+if (payload.options) requestPayload.options = payload.options;
+
+// Keep the account logic for balances
+if (path === '/v1/balances' || path === '/v1/order/new') {
+    requestPayload.account = payload.account || 'primary';
+}
+  //if (path === '/v1/order/new') {
+  //  requestPayload.account = requestPayload.account || 'primary';
+  //}
 
   const encodedPayload = Buffer.from(JSON.stringify(requestPayload)).toString('base64');
 
@@ -289,7 +298,7 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
     .digest('hex');
 
   const headers = {
-    'Content-Type': 'text/plain',
+    //'Content-Type': 'text/plain',
     'Content-Length': '0',
     'X-GEMINI-APIKEY': apiKey,
     'X-GEMINI-PAYLOAD': encodedPayload,
@@ -299,7 +308,8 @@ async function geminiRequest(apiKey, apiSecret, path, payload = {}) {
 
   console.log('🔍 Gemini request', { path, env, requestPayload });
 
-  const response = await axios.post(url, {}, { headers, timeout: 10000 });
+  //const response = await axios.post(url, {}, { headers, timeout: 10000 });
+  const response = await axios.post(url, null, { headers, timeout: 10000 });
   return response.data;
 }
 
@@ -539,46 +549,99 @@ async function executeRealGeminiTrade(userId, modelId, modelName, symbol, action
     const apiSecret = decrypt(rows[0].api_secret_enc, rows[0].iv, rows[0].auth_tag);
     const price = await getGeminiPrice(symbol, 'live');
     const quantity = (amountUSD / price).toFixed(6);
+    const totalValue = (price * parseFloat(quantity)).toFixed(2);
 
-    // 2. Marketable Limit Order (The Email Trigger)
-    const limitPrice = action.toUpperCase() === 'BUY' ? (price * 1.005).toFixed(2) : (price * 0.995).toFixed(2);
+    // 2. ✅ CHECK BALANCE BEFORE PLACING ORDER
+    const balances = await geminiRequest(rows[0].api_key, apiSecret, '/v1/balances', { env: 'live' });
+
+    const cryptoCurrency = symbol.replace('USD', ''); // e.g. 'BTC' from 'BTCUSD'
+    const usdBalance = parseFloat(balances.find(b => b.currency === 'USD')?.available || '0');
+    const cryptoBalance = parseFloat(balances.find(b => b.currency === cryptoCurrency)?.available || '0');
+
+    console.log(`💰 Balances — USD: $${usdBalance} | ${cryptoCurrency}: ${cryptoBalance}`);
+
+    // Auto-switch if insufficient balance
+    let finalAction = action.toUpperCase();
+    if (finalAction === 'SELL' && cryptoBalance < parseFloat(quantity)) {
+      console.log(`⚠️ Not enough ${cryptoCurrency} to SELL (have: ${cryptoBalance}, need: ${quantity}). Switching to BUY.`);
+      finalAction = 'BUY';
+    }
+    if (finalAction === 'BUY' && usdBalance < parseFloat(totalValue)) {
+      console.log(`⚠️ Not enough USD to BUY (have: $${usdBalance}, need: $${totalValue}). Switching to SELL.`);
+      finalAction = 'SELL';
+    }
+
+    // 3. Double-check after switch — if STILL can't afford either side, abort
+    if (finalAction === 'SELL' && cryptoBalance < parseFloat(quantity)) {
+      throw new Error(`Insufficient funds: Cannot SELL ${quantity} ${cryptoCurrency} (balance: ${cryptoBalance})`);
+    }
+    if (finalAction === 'BUY' && usdBalance < parseFloat(totalValue)) {
+      throw new Error(`Insufficient funds: Cannot BUY $${totalValue} worth of ${cryptoCurrency} (balance: $${usdBalance})`);
+    }
+
+    // 4. Marketable Limit Order
+    const limitPrice = finalAction === 'BUY'
+      ? (price * 1.005).toFixed(2)
+      : (price * 0.995).toFixed(2);
 
     const orderPayload = {
       symbol: symbol.toLowerCase(),
       amount: quantity.toString(),
-      side: action.toLowerCase(),
+      side: finalAction.toLowerCase(),
       type: 'exchange limit',
       price: limitPrice,
       client_order_id: `live_${modelId}_${Date.now()}`
     };
 
     console.log('📤 Sending to Gemini API...');
-    const geminiResponse = await geminiRequest(rows[0].api_key, apiSecret, "/v1/order/new", { ...orderPayload, env: 'live' });
+    const geminiResponse = await geminiRequest(rows[0].api_key, apiSecret, '/v1/order/new', { ...orderPayload, env: 'live' });
 
-    // 3. Save to DB
+    // 5. ✅ IMMEDIATELY PUSH TO FRONTEND (Before DB write!)
     const timestamp = Date.now();
-    await db.query(
+    if (io) {
+      io.to(`user:${userId}`).emit('gemini_transaction', {
+        user_id: userId,
+        model_id: modelId,
+        model_name: modelName,
+        action: finalAction,
+        crypto_symbol: symbol.toUpperCase(),
+        crypto_price: price,
+        quantity: quantity,
+        total_value: totalValue,
+        timestamp,
+      });
+
+      io.to(`user:${userId}`).emit('log_entry', {
+        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol.toUpperCase()} @ $${price.toFixed(2)}`,
+        type: 'success',
+        time: timestamp
+      });
+    }
+
+    // 6. SAVE TO DB IN BACKGROUND (Non-blocking)
+    db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, action.toUpperCase(), symbol.toUpperCase(), price, quantity, amountUSD, timestamp]
-    );
-
-    // 4. Emit to frontend
-    io.to(`user:${userId}`).emit('gemini_transaction', {
-      user_id: userId,
-      model_id: modelId,
-      model_name: modelName,
-      action: action.toUpperCase(),
-      crypto_symbol: symbol.toUpperCase(),
-      crypto_price: price,
-      quantity: quantity,
-      total_value: amountUSD,
-      timestamp,
+      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
+    ).catch(dbErr => {
+      console.error('❌ DB Insert Failed (trade already executed on Gemini):', dbErr.message);
     });
 
+    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${price} | Qty: ${quantity}`);
     return geminiResponse;
+
   } catch (err) {
     console.error('❌ REAL TRADE FAILED:', err.message);
+
+    // Notify frontend of failure
+    if (io) {
+      io.to(`user:${userId}`).emit('log_entry', {
+        message: `❌ Trade Failed for ${modelName}: ${err.message}`,
+        type: 'error',
+        time: Date.now()
+      });
+    }
+
     throw err;
   }
 }
@@ -595,63 +658,98 @@ async function generateTrade(userId, modelId, modelName, symbol) {
 
     // 2. GET KEYS FOR REAL TRADE
     const [rows] = await db.query('SELECT api_key, api_secret_enc, iv, auth_tag FROM user_gemini_credentials WHERE user_id = ?', [userId]);
-    
-    if (rows.length > 0) {
-      const apiSecret = decrypt(rows[0].api_secret_enc, rows[0].iv, rows[0].auth_tag);
-      
-      // 3. PLACE REAL LIMIT ORDER (To trigger Email)
-      const limitPrice = action === 'BUY' ? (price * 1.005).toFixed(2) : (price * 0.995).toFixed(2);
-      
-      // ✅ Check balance before placing order
-      const balances = await geminiRequest(rows[0].api_key, apiSecret, '/v1/balances', { env: 'live' });
 
-      const cryptoCurrency = symbol.replace('USD', ''); // e.g. 'BTC' from 'BTCUSD'
-      const usdBalance = parseFloat(balances.find(b => b.currency === 'USD')?.available || '0');
-      const cryptoBalance = parseFloat(balances.find(b => b.currency === cryptoCurrency)?.available || '0');
-
-      // If SELL but not enough crypto → switch to BUY
-      // If BUY but not enough USD → switch to SELL
-      let finalAction = action;
-      if (action === 'SELL' && cryptoBalance < parseFloat(quantity)) {
-        console.log(`⚠️ Not enough ${cryptoCurrency} to SELL. Switching to BUY.`);
-        finalAction = 'BUY';
-      }
-      if (action === 'BUY' && usdBalance < parseFloat(totalValue)) {
-        console.log(`⚠️ Not enough USD to BUY. Switching to SELL.`);
-        finalAction = 'SELL';
-      }
-
-      const finalLimitPrice = finalAction === 'BUY'
-        ? (price * 1.005).toFixed(2)
-        : (price * 0.995).toFixed(2);
-
-      const orderPayload = {
-        symbol: symbol.toLowerCase(),
-        amount: quantity.toString(),
-        side: finalAction.toLowerCase(),
-        type: 'exchange limit',
-        price: finalLimitPrice,
-        client_order_id: `live_${modelId}_${Date.now()}`
-      };
-
-      console.log('📤 [AUTOMATED] Sending Real Order to Gemini...');
-      await geminiRequest(rows[0].api_key, apiSecret, "/v1/order/new", { ...orderPayload, env: 'live' });
+    if (rows.length === 0) {
+      console.warn(`⚠️ No credentials found for user ${userId}`);
+      return null;
     }
 
-    // 4. Save to DB so it shows in your table
+    const apiSecret = decrypt(rows[0].api_secret_enc, rows[0].iv, rows[0].auth_tag);
+
+    // 3. CHECK BALANCE BEFORE PLACING ORDER
+    const balances = await geminiRequest(rows[0].api_key, apiSecret, '/v1/balances', { env: 'live' });
+
+    const cryptoCurrency = symbol.replace('USD', ''); // e.g. 'BTC' from 'BTCUSD'
+    const usdBalance = parseFloat(balances.find(b => b.currency === 'USD')?.available || '0');
+    const cryptoBalance = parseFloat(balances.find(b => b.currency === cryptoCurrency)?.available || '0');
+
+    // Auto-switch action if insufficient balance
+    let finalAction = action;
+    if (action === 'SELL' && cryptoBalance < parseFloat(quantity)) {
+      console.log(`⚠️ Not enough ${cryptoCurrency} to SELL. Switching to BUY.`);
+      finalAction = 'BUY';
+    }
+    if (action === 'BUY' && usdBalance < parseFloat(totalValue)) {
+      console.log(`⚠️ Not enough USD to BUY. Switching to SELL.`);
+      finalAction = 'SELL';
+    }
+
+    const finalLimitPrice = finalAction === 'BUY'
+      ? (price * 1.005).toFixed(2)
+      : (price * 0.995).toFixed(2);
+
+    const orderPayload = {
+      symbol: symbol.toLowerCase(),
+      amount: quantity.toString(),
+      side: finalAction.toLowerCase(),
+      type: 'exchange limit',
+      price: finalLimitPrice,
+      client_order_id: `live_${modelId}_${Date.now()}`
+    };
+
+    // 4. PLACE REAL ORDER
+    console.log('📤 [AUTOMATED] Sending Real Order to Gemini...');
+    await geminiRequest(rows[0].api_key, apiSecret, '/v1/order/new', { ...orderPayload, env: 'live' });
+
+    // 5. ✅ IMMEDIATELY PUSH TO FRONTEND VIA SOCKET (Before DB write!)
     const timestamp = Date.now();
-    await db.query(
+    if (io) {
+      // Update the transactions table instantly
+      io.to(`user:${userId}`).emit('gemini_transaction', {
+        model_name: modelName,
+        action: finalAction,
+        crypto_symbol: symbol,
+        crypto_price: price,
+        quantity: quantity,
+        total_value: totalValue,
+        timestamp: timestamp
+      });
+
+      // Update the log panel instantly
+      io.to(`user:${userId}`).emit('log_entry', {
+        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol} @ $${price.toFixed(2)}`,
+        type: 'success',
+        time: timestamp
+      });
+    }
+
+    // 6. SAVE TO DB IN BACKGROUND (Non-blocking — UI already updated above)
+    db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [userId, modelId, modelName, finalAction, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
-    );
+    ).catch(dbErr => {
+      console.error('❌ DB Insert Failed (trade already executed on Gemini):', dbErr.message);
+    });
 
-    return { modelName, action, symbol, price, quantity, timestamp };
+    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${price} | Qty: ${quantity}`);
+    return { modelName, action: finalAction, symbol, price, quantity, timestamp };
+
   } catch (error) {
     console.error('❌ Automated Trade Failed:', error.message);
+
+    // Notify frontend of failure too
+    if (io) {
+      io.to(`user:${userId}`).emit('log_entry', {
+        message: `❌ Trade Failed for ${modelName}: ${error.message}`,
+        type: 'error',
+        time: Date.now()
+      });
+    }
+
+    return null;
   }
 }
-
 /* ----------------------------------------
    CONFIGURABLE UPDATE INTERVAL
 -----------------------------------------*/

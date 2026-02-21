@@ -12,8 +12,8 @@ import AuthSection from './AuthSection';
 // Removed import GeminiSection since we replace it inline
 import TradingControls from './TradingControls';
 import SystemLogs from './SystemLogs';
-import PositionsTable from './PositionsTable';
-import MarketTradesTable from './MarketTradesTable';
+//import PositionsTable from './PositionsTable';
+//import MarketTradesTable from './MarketTradesTable';
 import TransactionsTable from './TransactionsTable';
 
 // Import your Gemini UI components
@@ -1761,34 +1761,16 @@ Continue?`
       {/* Place this after SystemLogs and before charts */}
       {/* 💎 Real Gemini Transactions Table (Restored & Fixed) */}
       
-      {isGeminiConnected && (
-        <PositionsTable
-          loadingPositions={loadingPositions}
-          openPositions={openPositions}
-          onClosePosition={handleClosePosition}
-        />
-      )}
-
-      {isGeminiConnected && (                                                         
-        <MarketTradesTable
-          btcTrades={btcTrades}
-          ethTrades={ethTrades}
-          solTrades={solTrades}
-        />   
-      )}
-
-      {isGeminiConnected && (
-        <TransactionsTable 
-          trades={geminiTransactions}
-          loadingTrades={false}
-          formatTimestamp={formatTimestamp}
-        />
-      )}
+      <TransactionsTable 
+        trades={geminiTransactions}
+        loadingTrades={false}
+        formatTimestamp={formatTimestamp}
+      />
+      
 
       
 
       <div className="charts-container">
-        <LiveMultiChart history={cryptoHistory} symbols={['BTCUSD', 'ETHUSD', 'SOLUSD']} />
         <ModelsComparisonChart
           modelsHistory={modelsHistory}
           selectedModels={selectedModels}

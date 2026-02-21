@@ -12,7 +12,9 @@ const TransactionsTable = ({ loadingTrades, trades, formatTimestamp }) => {
         boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
       }}
     >
-      <h2 style={{ marginTop: 0, marginBottom: '15px' }}>📊 Last 20 Transactions</h2>
+      <h2 style={{ marginTop: 0, marginBottom: '15px' }}>
+        <span style={{ color: '#4F8EF7', fontSize: '1.2em' }}>💎</span>
+          Last 20 Market Trades (Gemini)</h2>
 
       {loadingTrades ? (
         <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
