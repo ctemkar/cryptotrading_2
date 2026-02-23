@@ -597,7 +597,14 @@ async function executeRealGeminiTrade(userId, modelId, modelName, symbol, action
     const geminiResponse = await geminiRequest(rows[0].api_key, apiSecret, '/v1/order/new', { ...orderPayload, env: 'live' });
 
     // 5. ✅ IMMEDIATELY PUSH TO FRONTEND (Before DB write!)
+    // 5. Extract ACTUAL execution price from Gemini response
+    const actualPrice = parseFloat(geminiResponse.avg_execution_price) || parseFloat(geminiResponse.price) || price;
+    const actualQty = parseFloat(geminiResponse.executed_amount) || parseFloat(quantity);
+    const actualTotal = (actualPrice * actualQty).toFixed(2);
     const timestamp = Date.now();
+
+    console.log(`💰 Actual fill price: $${actualPrice} (requested: $${price})`);
+
     if (io) {
       io.to(`user:${userId}`).emit('gemini_transaction', {
         user_id: userId,
@@ -605,31 +612,30 @@ async function executeRealGeminiTrade(userId, modelId, modelName, symbol, action
         model_name: modelName,
         action: finalAction,
         crypto_symbol: symbol.toUpperCase(),
-        crypto_price: price,
-        quantity: quantity,
-        total_value: totalValue,
+        crypto_price: actualPrice,   // ✅ ACTUAL price
+        quantity: actualQty,
+        total_value: actualTotal,
         timestamp,
       });
 
       io.to(`user:${userId}`).emit('log_entry', {
-        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol.toUpperCase()} @ $${price.toFixed(2)}`,
+        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol.toUpperCase()} @ $${actualPrice.toFixed(2)}`,
         type: 'success',
         time: timestamp
       });
     }
 
-    // 6. SAVE TO DB IN BACKGROUND (Non-blocking)
+    // 6. SAVE TO DB with ACTUAL price
     db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), actualPrice, actualQty, actualTotal, timestamp]
     ).catch(dbErr => {
-      console.error('❌ DB Insert Failed (trade already executed on Gemini):', dbErr.message);
+      console.error('❌ DB Insert Failed:', dbErr.message);
     });
 
-    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${price} | Qty: ${quantity}`);
+    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${actualPrice} | Qty: ${actualQty}`);
     return geminiResponse;
-
   } catch (err) {
     console.error('❌ REAL TRADE FAILED:', err.message);
 
@@ -702,22 +708,29 @@ async function generateTrade(userId, modelId, modelName, symbol) {
     await geminiRequest(rows[0].api_key, apiSecret, '/v1/order/new', { ...orderPayload, env: 'live' });
 
     // 5. ✅ IMMEDIATELY PUSH TO FRONTEND VIA SOCKET (Before DB write!)
+  // 5. ✅ Extract ACTUAL execution price from Gemini response
+    const actualPrice = parseFloat(order?.avg_execution_price) || parseFloat(order?.price) || price;
+    const actualQty = parseFloat(order?.executed_amount) || parseFloat(quantity);
+    const actualTotal = (actualPrice * actualQty).toFixed(2);
     const timestamp = Date.now();
+
+    console.log(`💰 Actual fill price: $${actualPrice} (requested: $${price})`);
+
     if (io) {
       // Update the transactions table instantly
       io.to(`user:${userId}`).emit('gemini_transaction', {
         model_name: modelName,
         action: finalAction,
         crypto_symbol: symbol,
-        crypto_price: price,
-        quantity: quantity,
-        total_value: totalValue,
+        crypto_price: actualPrice,       // ✅ actual fill price
+        quantity: actualQty,
+        total_value: actualTotal,
         timestamp: timestamp
       });
 
       // Update the log panel instantly
       io.to(`user:${userId}`).emit('log_entry', {
-        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol} @ $${price.toFixed(2)}`,
+        message: `💎 Gemini Trade Confirmed: ${finalAction} ${symbol} @ $${actualPrice.toFixed(2)}`,
         type: 'success',
         time: timestamp
       });
@@ -727,13 +740,13 @@ async function generateTrade(userId, modelId, modelName, symbol) {
     db.query(
       `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), price, quantity, totalValue, timestamp]
+      [userId, modelId, modelName, finalAction, symbol.toUpperCase(), actualPrice, actualQty, actualTotal, timestamp]
     ).catch(dbErr => {
       console.error('❌ DB Insert Failed (trade already executed on Gemini):', dbErr.message);
     });
 
-    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${price} | Qty: ${quantity}`);
-    return { modelName, action: finalAction, symbol, price, quantity, timestamp };
+    console.log(`✅ [DONE] ${modelName} ${finalAction} ${symbol} @ $${actualPrice} | Qty: ${actualQty}`);
+    return { modelName, action: finalAction, symbol, price: actualPrice, quantity: actualQty, timestamp };
 
   } catch (error) {
     console.error('❌ Automated Trade Failed:', error.message);

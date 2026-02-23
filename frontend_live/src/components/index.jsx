@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import LiveMultiChart from '../LiveMultiChart';
 import ModelsComparisonChart from '../ModelsComparisonChart';
 import useModels from '../../hooks/useModels';
@@ -113,6 +113,8 @@ function Dashboard() {
   const { modelsLatest, modelsHistory } = useModels();
   const { latest: cryptoLatest, latest: cryptoPrices, history: cryptoHistory } = useCryptoPrices();
   const availableModels = Object.values(modelsLatest);
+  // ✅ ADD THIS RIGHT HERE
+  console.log('Current BTC Price:', cryptoLatest.BTCUSD, 'Model 1 Value:', modelsLatest[Object.keys(modelsLatest)[0]]?.accountValue);
   const startValue = (isTrading && appState?.tradingSession?.startValue != null)
     ? Number(appState.tradingSession.startValue)
     : (parseFloat(startingValue) || 100);
@@ -550,27 +552,61 @@ function Dashboard() {
 
   // --- getNormalizedValue helper ---
   const getNormalizedValue = (modelId) => {
+    // 1. Handle manual overrides first
     if (localModelOverrides[modelId] !== undefined) {
-      return localModelOverrides[modelId];
+      return Math.round(localModelOverrides[modelId]);
     }
 
+    // 2. Get the base starting value (e.g., 10)
+    const baseStart = Number(startingValue) || 10;
+
+    // 3. Get the model data
     const model = modelsLatest[modelId];
-    if (!model || typeof model.accountValue !== 'number') {
-      return safeStartValue;
+    if (!model || !initialValues[modelId]) {
+      return baseStart;
     }
 
-    if (!initialValues[modelId]) {
-      return Math.round(model.accountValue);
+    const actualInitial = Number(initialValues[modelId]);
+    const actualCurrent = Number(model.accountValue);
+
+    if (actualInitial === 0) return baseStart;
+
+    // --- THE MATH FIX ---
+    // Calculate the % change of the model (e.g., 0.02 for +2%)
+    const modelChangePercent = (actualCurrent - actualInitial) / actualInitial;
+
+    // Calculate the % change of BTC (e.g., 0.005 for +0.5%)
+    const btcNow = Number(cryptoLatest?.BTCUSD) || 0;
+    const btcAtStart = Number(appState?.tradingSession?.entryPrices?.BTCUSD) || btcNow;
+    
+    let btcChangePercent = 0;
+    if (btcAtStart > 0) {
+      btcChangePercent = (btcNow - btcAtStart) / btcAtStart;
     }
 
-    const actualInitial = initialValues[modelId];
-    const actualCurrent = model.accountValue;
+    // Blend the performance: 70% Model logic + 30% Market volatility
+    const blendedChange = (modelChangePercent * 0.7) + (btcChangePercent * 0.3);
 
-    if (actualInitial === 0) return safeStartValue;
+    // Apply the blended % change to your base 10
+    const finalValue = baseStart * (1 + blendedChange);
 
-    const percentChange = (actualCurrent - actualInitial) / actualInitial;
-    return Math.round(safeStartValue * (1 + percentChange));
+    // Return a clean whole number (8, 9, 10, 11...)
+    return Math.round(finalValue);
   };
+
+  const nonSelectedModelsMetrics = useMemo(() => {
+    if (!isTrading || nonSelectedModels.length === 0) {
+      return { totalPL: 0, plPercentage: '0.00', count: nonSelectedModels.length };
+    }
+    const totalPL = nonSelectedModels.reduce((sum, model) => {
+      const modelId = model.id || model.name;
+      const currentValue = getNormalizedValue(modelId);
+      return sum + (currentValue - startValue);
+    }, 0);
+    const denom = startValue * nonSelectedModels.length;
+    const plPercentage = denom > 0 ? ((totalPL / denom) * 100).toFixed(2) : '0.00';
+    return { totalPL, plPercentage, count: nonSelectedModels.length };
+  }, [nonSelectedModels, isTrading, startValue, modelsLatest, localModelOverrides, cryptoLatest]); // ✅ cryptoLatest added
 
   // --- handleModelSelection helper ---
   const handleModelSelection = (modelId) => {
@@ -1748,11 +1784,13 @@ Continue?`
         finalProfitLoss={finalProfitLoss}
         showMonitoringPanel={showMonitoringPanel}
         modelsLatest={modelsLatest}
+        cryptoLatest={cryptoLatest} // <--- Add this to force re-renders on price ticks
         getNormalizedValue={getNormalizedValue}
         handleModelSelection={handleModelSelection}
         availableModels={availableModels}
         nonSelectedModels={nonSelectedModels}
         setSelectedModels={setSelectedModels}
+        nonSelectedModelsMetrics={nonSelectedModelsMetrics}
       />
 
       <SystemLogs tradingLogs={tradingLogs} />
