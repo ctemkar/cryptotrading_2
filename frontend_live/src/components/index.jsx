@@ -550,11 +550,28 @@ function Dashboard() {
     };
   };
 
+  // ✅ NEW: Sync UI initialValues with Backend initialValues automatically
+  useEffect(() => {
+    const backendInitials = {};
+    let hasNewData = false;
+
+    Object.values(modelsLatest).forEach(m => {
+      if (m.initialValue && !initialValues[m.id]) {
+        backendInitials[m.id] = m.initialValue;
+        hasNewData = true;
+      }
+    });
+
+    if (hasNewData) {
+      setInitialValues(prev => ({ ...prev, ...backendInitials }));
+    }
+  }, [modelsLatest, initialValues]);
+
   // --- getNormalizedValue helper ---
   const getNormalizedValue = (modelId) => {
     // 1. Handle manual overrides first
     if (localModelOverrides[modelId] !== undefined) {
-      return Math.round(localModelOverrides[modelId]);
+      return parseFloat(localModelOverrides[modelId].toFixed(2));
     }
 
     // 2. Get the base starting value (e.g., 10)
@@ -562,52 +579,85 @@ function Dashboard() {
 
     // 3. Get the model data
     const model = modelsLatest[modelId];
-    if (!model || !initialValues[modelId]) {
-      return baseStart;
-    }
 
-    const actualInitial = Number(initialValues[modelId]);
+    // ✅ FIX: Removed the bad guard "!initialValues[modelId]"
+    // Old code returned baseStart (10) whenever initialValues was empty
+    // Now we fall back gracefully instead of giving up
+    if (!model) return baseStart;
+
+    // ✅ FIX: Prioritize in order:
+    // 1st → UI initialValues (set when user clicks Start)
+    // 2nd → Backend model.initialValue (from socket)
+    // 3rd → Fallback to 100 (backend default starting value)
+    const actualInitial = Number(initialValues[modelId]) || Number(model.initialValue) || 100;
     const actualCurrent = Number(model.accountValue);
 
     if (actualInitial === 0) return baseStart;
 
-    // --- THE MATH FIX ---
+    // --- THE MATH ---
     // Calculate the % change of the model (e.g., 0.02 for +2%)
     const modelChangePercent = (actualCurrent - actualInitial) / actualInitial;
 
     // Calculate the % change of BTC (e.g., 0.005 for +0.5%)
     const btcNow = Number(cryptoLatest?.BTCUSD) || 0;
-    const btcAtStart = Number(appState?.tradingSession?.entryPrices?.BTCUSD) || btcNow;
-    
+    const btcAtStart = Number(appState?.tradingSession?.entryPrices?.BTCUSD) || 0;
+
     let btcChangePercent = 0;
-    if (btcAtStart > 0) {
+    if (btcAtStart > 0 && btcNow > 0) {
       btcChangePercent = (btcNow - btcAtStart) / btcAtStart;
     }
 
     // Blend the performance: 70% Model logic + 30% Market volatility
     const blendedChange = (modelChangePercent * 0.7) + (btcChangePercent * 0.3);
 
-    // Apply the blended % change to your base 10
+    // Apply the blended % change to your base starting value
     const finalValue = baseStart * (1 + blendedChange);
 
-    // Return a clean whole number (8, 9, 10, 11...)
-    return Math.round(finalValue);
+    return parseFloat(finalValue.toFixed(2));
   };
 
   const nonSelectedModelsMetrics = useMemo(() => {
     if (!isTrading || nonSelectedModels.length === 0) {
       return { totalPL: 0, plPercentage: '0.00', count: nonSelectedModels.length };
     }
+
     const totalPL = nonSelectedModels.reduce((sum, model) => {
       const modelId = model.id || model.name;
       const currentValue = getNormalizedValue(modelId);
-      return sum + (currentValue - startValue);
+      // Use startingValue (same source as baseStart) to avoid mismatch
+      const base = Number(startingValue) || 10;
+      return sum + (currentValue - base);
     }, 0);
-    const denom = startValue * nonSelectedModels.length;
-    const plPercentage = denom > 0 ? ((totalPL / denom) * 100).toFixed(2) : '0.00';
-    return { totalPL, plPercentage, count: nonSelectedModels.length };
-  }, [nonSelectedModels, isTrading, startValue, modelsLatest, localModelOverrides, cryptoLatest]); // ✅ cryptoLatest added
 
+    const base = Number(startingValue) || 10;
+    const denom = base * nonSelectedModels.length;
+    const plPercentage = denom > 0 ? ((totalPL / denom) * 100).toFixed(2) : '0.00';
+
+    return { totalPL: parseFloat(totalPL.toFixed(2)), plPercentage, count: nonSelectedModels.length };
+  }, [nonSelectedModels, isTrading, startingValue, modelsLatest, localModelOverrides, cryptoLatest]);
+
+  const normalizedModelsHistory = useMemo(() => {
+  const result = {};
+
+  Object.keys(modelsHistory).forEach(modelId => {
+    const history = modelsHistory[modelId];
+    if (!history || history.length === 0) return;
+
+    const backendInitial = Number(initialValues[modelId]) 
+      || Number(modelsLatest[modelId]?.initialValue) 
+      || 100;
+
+    const baseStart = Number(startingValue) || 10;
+
+    result[modelId] = history.map(point => ({
+      ...point,
+      accountValue: parseFloat(((point.accountValue / backendInitial) * baseStart).toFixed(2))
+    }));
+  });
+
+  return result;
+}, [modelsHistory, initialValues, modelsLatest, startingValue]);
+  
   // --- handleModelSelection helper ---
   const handleModelSelection = (modelId) => {
     console.log('Card clicked for model:', modelId);
@@ -1810,13 +1860,11 @@ Continue?`
 
       <div className="charts-container">
         <ModelsComparisonChart
-          modelsHistory={modelsHistory}
-          selectedModels={selectedModels}
-          startingValue={startingValue ? Number(startingValue) : startValue}
-          initialValues={initialValues}
+          modelsHistory={normalizedModelsHistory}
+          modelsMeta={Object.values(modelsLatest)}
+          startingValue={Number(startingValue) || Number(startValue) || 10}
         />
       </div>
-
       
     </div>
   );

@@ -512,7 +512,8 @@ MODELS.forEach(m => {
     id: m.id,
     name: m.name,
     color: m.color,
-    accountValue: STARTING_VALUE,
+    accountValue: STARTING_VALUE,   // ✅ constant, safe at boot
+    initialValue: STARTING_VALUE,   // ✅ constant, safe at boot
     volatility: m.volatility
   };
   modelHistory[m.id] = [{ time: Date.now(), accountValue: STARTING_VALUE }];
@@ -771,7 +772,7 @@ let updateIntervalId = null;
 let tradeIntervalId = null;
 let geminiTradesIntervalId = null;
 
-function updateModels() {
+function updateModels() { 
   const now = Date.now();
   const updates = [];
 
@@ -782,7 +783,7 @@ function updateModels() {
     const change = (Math.random() * 2 - 1) * state.volatility * 50;
     let updated = prev + change;
 
-    if (updated < 100) updated = 100;
+    if (updated < 1) updated = 1;
 
     const intValue = Math.round(updated);
 
@@ -804,6 +805,7 @@ function updateModels() {
       name: m.name,
       color: m.color,
       accountValue: intValue,
+      initialValue: state.initialValue,   // ✅ ADD THIS
       time: now
     });
   });
@@ -1150,6 +1152,14 @@ app.put('/api/app-state', async (req, res) => {
         startTime: finalState.tradingSession?.startTime,
         entryPrices: finalState.tradingSession?.entryPrices || {}
       });
+
+      MODELS.forEach(m => {
+        modelState[m.id].accountValue = startValue;
+        modelState[m.id].initialValue = startValue;   // ✅ ADD THIS
+        modelHistory[m.id] = [{ time: Date.now(), accountValue: startValue }];
+      });
+
+      console.log(`✅ Backend modelState reset to $${startValue} for user ${userId}`);
     }
 
     res.json({ success: true, version: newVersion });

@@ -16,7 +16,13 @@ export default function useModels() {
     function handleSnapshot(snapshot) {
       // snapshot: [{id,name,color,accountValue,history}]
       snapshot.forEach(m => {
-        setModelsLatest(prev => ({ ...prev, [m.id]: { id: m.id, name: m.name, color: m.color, accountValue: m.accountValue } }));
+        setModelsLatest(prev => ({ ...prev, [m.id]: {
+          id: m.id,
+          name: m.name,
+          color: m.color,
+          accountValue: m.accountValue,
+          initialValue: m.initialValue // ✅ ADD THIS LINE
+        } }));
         historyRef.current[m.id] = m.history ? m.history.slice(-200) : (historyRef.current[m.id]||[]);
       });
       tick(n => n+1);
@@ -25,14 +31,20 @@ export default function useModels() {
     function handleUpdate(modelsOut) {
       // modelsOut: [{id,name,color,accountValue,time}, ...]
       modelsOut.forEach(m => {
-        setModelsLatest(prev => ({ ...prev, [m.id]: { id: m.id, name: m.name, color: m.color, accountValue: m.accountValue } }));
+        setModelsLatest(prev => ({ ...prev, [m.id]: {
+          id: m.id,
+          name: m.name,
+          color: m.color,
+          accountValue: m.accountValue,
+          initialValue: m.initialValue ?? prev[m.id]?.initialValue
+        } }));
         const arr = historyRef.current[m.id] || [];
         arr.push({ time: m.time, accountValue: m.accountValue });
         if (arr.length > 200) arr.shift();
         historyRef.current[m.id] = arr;
       });
-      // occasional re-render
-      if ((Math.random()*3|0) === 0) tick(n => n+1);
+      // ✅ FIX: Always trigger re-render (not random 1-in-3)
+      tick(n => n + 1);
     }
 
     socket.on("models_snapshot", handleSnapshot);
