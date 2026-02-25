@@ -383,7 +383,7 @@ function openLiveGeminiPosition({ modelId, modelName, symbol, amount, price, sid
 
 // ✅ Added userId to the parameters
 async function closeLiveGeminiPositionAndRecord({
-  userId, // <--- ADD THIS
+  userId,
   modelId,
   modelName,
   symbol,
@@ -411,47 +411,39 @@ async function closeLiveGeminiPositionAndRecord({
     pnl = 0;
   }
 
+  // ✅ NEW: Calculate P&L percentage
+  const pnlPercent = entryPrice > 0
+    ? ((pnl / (entryPrice * qtyExecuted)) * 100).toFixed(2)
+    : '0.00';
+
   const timestamp = Date.now();
   const totalValue = (exit * qtyExecuted).toFixed(2);
-
   const closingAction = pos.side === 'LONG' ? 'SELL' : 'BUY';
 
-  // ✅ Now userId is correctly defined and will be inserted
+  // ✅ UPDATED: INSERT now includes pnl and pnl_percent
+  // Make sure you've run this on your DB first:
+  // ALTER TABLE trades ADD COLUMN pnl DECIMAL(15,2), ADD COLUMN pnl_percent DECIMAL(10,2);
   await db.query(
-    `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, modelId, modelName, closingAction, symbol.toUpperCase(), exit, qtyExecuted, totalValue, timestamp]
+    `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp, pnl, pnl_percent)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [userId, modelId, modelName, closingAction, symbol.toUpperCase(), exit, qtyExecuted, totalValue, timestamp, pnl.toFixed(2), pnlPercent]
   );
 
-  // ✅ ADD THIS BLOCK HERE
-io.to(`user:${userId}`).emit('gemini_transaction', {
-  user_id: userId,
-  model_id: modelId,
-  model_name: modelName,
-  action: closingAction,
-  crypto_symbol: symbol.toUpperCase(),
-  crypto_price: exit,
-  quantity: qtyExecuted,
-  total_value: totalValue,
-  timestamp,
-});
-// ✅ END OF NEW CODE
-  
   const remaining = pos.amount - qtyExecuted;
 
   if (remaining <= 0.00000001) {
     delete liveGeminiPositions[key];
     console.log(
-      `✅ [LIVE] Fully closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qtyExecuted}, P&L = ${pnl.toFixed(2)}`
+      `✅ [LIVE] Fully closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, qty ${qtyExecuted}, P&L = ${pnl.toFixed(2)} (${pnlPercent}%)`
     );
   } else {
     liveGeminiPositions[key].amount = remaining;
     console.log(
-      `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)}`
+      `✅ [LIVE] Partially closed ${pos.side} position for ${modelName} on ${symbol}: entry ${entryPrice}, exit ${exit}, closed qty ${qtyExecuted}, remaining qty ${remaining}, P&L on closed = ${pnl.toFixed(2)} (${pnlPercent}%)`
     );
   }
 
-  // ✅ Emit the transaction to the user's room for real-time table update
+  // ✅ UPDATED: Single emit with pnl and pnl_percent included
   io.to(`user:${userId}`).emit('gemini_transaction', {
     user_id: userId,
     model_id: modelId,
@@ -461,9 +453,12 @@ io.to(`user:${userId}`).emit('gemini_transaction', {
     crypto_price: exit,
     quantity: qtyExecuted,
     total_value: totalValue,
+    pnl: pnl.toFixed(2),
+    pnl_percent: pnlPercent,
     timestamp,
   });
 
+  // ✅ UPDATED: position_closed also includes pnl_percent
   io.emit('position_closed', {
     model_id: modelId,
     model_name: modelName,
@@ -473,6 +468,7 @@ io.to(`user:${userId}`).emit('gemini_transaction', {
     exitPrice: exit,
     quantity: qtyExecuted,
     pnl,
+    pnl_percent: pnlPercent,
     remainingAmount: remaining > 0 ? remaining : 0,
     timestamp,
   });
@@ -484,6 +480,7 @@ io.to(`user:${userId}`).emit('gemini_transaction', {
     quantity: qtyExecuted,
     remaining,
     pnl,
+    pnl_percent: pnlPercent,
     timestamp,
   };
 }
@@ -1803,36 +1800,6 @@ app.get('/api/gemini/transactions', async (req, res) => {
 
     const lim = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
 
-    /*const [rows] = await db.query(
-     `
-      SELECT
-        id,
-        user_id,
-        model_id,
-        model_name,
-        action,
-        crypto_symbol,
-        crypto_price,
-        quantity,
-        total_value,
-        created_at    -- ✅ CHANGED FROM timestamp TO created_at
-      FROM trades
-      WHERE user_id = ?
-      ORDER BY created_at DESC    -- ✅ CHANGED FROM timestamp TO created_at
-      LIMIT ?
-      `,
-      [userId, lim]
-    );*/
-
-    /*const query = `
-      SELECT 
-        id, model_name, action, crypto_symbol, crypto_price, quantity, created_at
-      FROM trades
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 20
-    `;*/
-
     const query = `
       SELECT 
         id, 
@@ -1841,8 +1808,10 @@ app.get('/api/gemini/transactions', async (req, res) => {
         crypto_symbol, 
         crypto_price, 
         quantity, 
-        (crypto_price * quantity) as total_value, -- Add this!
-        created_at as timestamp -- Alias this to timestamp for the frontend
+        (crypto_price * quantity) AS total_value,
+        pnl,
+        pnl_percent,
+        created_at AS timestamp
       FROM trades
       WHERE user_id = ?
       ORDER BY created_at DESC

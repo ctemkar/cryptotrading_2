@@ -148,6 +148,28 @@ function Dashboard() {
     setOpenPositions(openPositionsFromHook);
   }, [openPositionsFromHook]);
 
+  // ✅ ADD THIS RIGHT HERE — Live P&L calculation on every price tick
+  useEffect(() => {
+    if (!openPositions.length || !cryptoPrices) return;
+
+    const updated = openPositions.map(pos => {
+      const symbol = (pos.symbol || pos.crypto_symbol || '').toUpperCase();
+      const currentPrice = cryptoPrices[symbol];
+      
+      if (!currentPrice || !pos.entryPrice) return pos;
+
+      const quantity = Number(pos.amount || pos.quantity || 0);
+      const pnl = (currentPrice - pos.entryPrice) * quantity;
+      const pnl_pct = ((currentPrice / pos.entryPrice) - 1) * 100;
+
+      return { ...pos, live_pnl: pnl, live_pnl_pct: pnl_pct };
+    });
+
+    if (JSON.stringify(updated) !== JSON.stringify(openPositions)) {
+      setOpenPositions(updated);
+    }
+  }, [cryptoPrices]); // ⚠️ Only depend on cryptoPrices — NOT openPositions (avoids infinite loop)
+
   useEffect(() => {
     setGeminiMarketTrades(geminiMarketTradesFromHook);
   }, [geminiMarketTradesFromHook]);
@@ -580,25 +602,16 @@ function Dashboard() {
     // 3. Get the model data
     const model = modelsLatest[modelId];
 
-    // ✅ FIX: Removed the bad guard "!initialValues[modelId]"
-    // Old code returned baseStart (10) whenever initialValues was empty
-    // Now we fall back gracefully instead of giving up
     if (!model) return baseStart;
 
-    // ✅ FIX: Prioritize in order:
-    // 1st → UI initialValues (set when user clicks Start)
-    // 2nd → Backend model.initialValue (from socket)
-    // 3rd → Fallback to 100 (backend default starting value)
     const actualInitial = Number(initialValues[modelId]) || Number(model.initialValue) || 100;
     const actualCurrent = Number(model.accountValue);
 
     if (actualInitial === 0) return baseStart;
 
     // --- THE MATH ---
-    // Calculate the % change of the model (e.g., 0.02 for +2%)
     const modelChangePercent = (actualCurrent - actualInitial) / actualInitial;
 
-    // Calculate the % change of BTC (e.g., 0.005 for +0.5%)
     const btcNow = Number(cryptoLatest?.BTCUSD) || 0;
     const btcAtStart = Number(appState?.tradingSession?.entryPrices?.BTCUSD) || 0;
 
@@ -611,11 +624,19 @@ function Dashboard() {
     const blendedChange = (modelChangePercent * 0.7) + (btcChangePercent * 0.3);
 
     // Apply the blended % change to your base starting value
-    const finalValue = baseStart * (1 + blendedChange);
+    let finalValue = baseStart * (1 + blendedChange);
+
+    // ✅ STEP 2: Add live Gemini P&L for this model's open position
+    const activePos = openPositions.find(p => p.modelId === modelId);
+    if (activePos?.live_pnl) {
+      // Scale the P&L relative to the model's initial value so it's proportional to baseStart
+      const pnlScaled = (activePos.live_pnl / actualInitial) * baseStart;
+      finalValue += pnlScaled;
+    }
 
     return parseFloat(finalValue.toFixed(2));
   };
-
+  
   const nonSelectedModelsMetrics = useMemo(() => {
     if (!isTrading || nonSelectedModels.length === 0) {
       return { totalPL: 0, plPercentage: '0.00', count: nonSelectedModels.length };
@@ -1355,20 +1376,24 @@ Continue?`
 
       const normalized = raw.map(tx => ({
         id: tx.id,
-        // 🤖 ADD THIS LINE to map model_name from DB to model for the table
+        model_name: tx.model_name || 'Manual',
         model: tx.model_name || 'Manual',
         crypto_symbol: (tx.crypto_symbol || 'UNKNOWN').toUpperCase(),
-        action: (tx.action || 'buy').toLowerCase(),
+        action: (tx.action || 'BUY').toUpperCase(),
         crypto_price: Number(tx.crypto_price || 0),
         quantity: Number(tx.quantity || 0),
-        total_value: Number(tx.total_value || (tx.crypto_price * tx.quantity) || 0),
-        timestamp: tx.timestamp || tx.created_at 
+        total_value: Number(tx.total_value || 0),
+        pnl: tx.pnl ?? null,
+        pnl_percent: tx.pnl_percent ?? null,
+        timestamp: tx.timestamp || tx.created_at
       }));
 
       setGeminiTransactions(normalized);
-      console.log('Normalized Transactions:', normalized); // Check console again after this
+      console.log('Normalized Transactions:', normalized);
     } catch (err) {
       console.error('❌ Failed to fetch transactions:', err);
+    } finally {
+      setLoadingTrades(false); // ✅ THIS IS THE FIX — always runs after fetch
     }
   }, [userInfo?.sub]);
 
@@ -1849,10 +1874,11 @@ Continue?`
       {/* Place this after SystemLogs and before charts */}
       {/* 💎 Real Gemini Transactions Table (Restored & Fixed) */}
       
-      <TransactionsTable 
+      <TransactionsTable
         trades={geminiTransactions}
-        loadingTrades={false}
+        loadingTrades={loadingTrades}
         formatTimestamp={formatTimestamp}
+        currentPrices={cryptoPrices}  // 👈 make sure this is passed
       />
       
 
