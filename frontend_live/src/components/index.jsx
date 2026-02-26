@@ -894,6 +894,14 @@ function Dashboard() {
     setInitialValues(initialVals);
     localStorage.setItem('initialValues', JSON.stringify(initialVals));
     setLocalModelOverrides(uiStartOverrides);
+
+    // ✅ THE FIX: Clear overrides after 2s so live normalized values kick in
+    setTimeout(() => {
+      setLocalModelOverrides({});
+      console.log('🔄 Cleared all start overrides — live normalized values now active');
+      addLog('📊 Models now showing live normalized values', 'info');
+    }, 2000);
+
     setShowMonitoringPanel(true);
     setIsTrading(true);
     setTradingStopped(false);
@@ -930,7 +938,7 @@ function Dashboard() {
       try {
         const response = await fetch('/api/app-state', {
           method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             userId: userInfo.sub,
             state: stateToSave,
