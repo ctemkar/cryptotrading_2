@@ -1013,9 +1013,112 @@ function Dashboard() {
 
   // --- handleStopTrading ---
   const handleStopTrading = async () => {
-    console.log("🛑 Stopping trade... keeping models:", selectedModels);
+  console.log("🛑 Stopping trade... keeping models:", selectedModels);
 
-    // calculate final profit/loss safely
+  // Stop trading flags first for immediate UX feedback
+  try {
+    setIsTrading(false);
+    setTradingStopped(true);
+    setStopReason("Trading stopped manually");
+  } catch (err) {
+    console.warn("Error setting trading state:", err);
+  }
+
+  if (typeof addLog === "function") addLog("Trading stopped manually", "info");
+
+  // Tell server to stop trading
+  try {
+    if (socket && typeof socket.emit === "function") {
+      socket.emit("stop_trading", { userId: userInfo?.sub });
+    }
+  } catch (err) {
+    console.warn("Error emitting stop_trading", err);
+  }
+
+  // Clear any pending simulated trade timers
+  try {
+    if (tradeTimeoutsRef?.current && tradeTimeoutsRef.current.length) {
+      tradeTimeoutsRef.current.forEach((tid) => {
+        clearTimeout(tid);
+        clearInterval(tid);
+      });
+      tradeTimeoutsRef.current = [];
+      if (typeof addLog === "function") addLog("Cleared pending trade timers", "info");
+      console.log("Cleared pending trade timers");
+    }
+  } catch (err) {
+    console.warn("Error clearing trade timers:", err);
+  }
+
+  // Helper to timeout long-running operations
+  const withTimeout = (p, ms) =>
+    Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+
+  // ✅ Step 4: Fetch REAL P/L from backend (matches Gemini)
+  let finalPnl = null;
+
+  if (isGeminiConnected && userInfo?.sub) {
+    try {
+      if (typeof addLog === "function") addLog("Fetching real session P/L from Gemini...", "info");
+
+      const pnlResp = await withTimeout(
+        axios.get('/api/gemini/session-pnl', { params: { userId: userInfo.sub } }),
+        15_000
+      );
+
+      if (pnlResp?.data?.success) {
+        const { totalPnl, startBalanceUsd, currentBalanceUsd, realizedPnl } = pnlResp.data.pnl;
+
+        finalPnl = totalPnl ?? 0;
+        setFinalProfitLoss(finalPnl);
+
+        if (typeof addLog === "function") {
+          addLog(
+            `📊 Session P/L: $${finalPnl >= 0 ? "+" : ""}${Number(finalPnl).toFixed(2)} | Start: $${Number(startBalanceUsd).toFixed(2)} → Now: $${Number(currentBalanceUsd).toFixed(2)}`,
+            finalPnl >= 0 ? "success" : "error"
+          );
+          addLog(
+            `💰 Realized P/L (closed trades): $${Number(realizedPnl).toFixed(2)}`,
+            "info"
+          );
+        }
+
+        console.log("✅ Real P/L fetched:", { totalPnl, startBalanceUsd, currentBalanceUsd, realizedPnl });
+      } else {
+        throw new Error(pnlResp?.data?.error || "session-pnl returned success: false");
+      }
+    } catch (pnlErr) {
+      console.warn("⚠️ Real P/L fetch failed, falling back to virtual calc:", pnlErr?.message || pnlErr);
+
+      // Fallback: virtual calculation (your original logic)
+      const totalProfit = selectedModels.reduce((sum, modelId) => {
+        let currentValue = 0;
+        try {
+          currentValue = typeof getNormalizedValue === "function" ? getNormalizedValue(modelId) : 0;
+        } catch (e) {
+          console.warn("getNormalizedValue error for", modelId, e);
+          currentValue = 0;
+        }
+        const sv = typeof startValue === "number" ? startValue : Number(startValue) || 0;
+        return sum + (currentValue - sv);
+      }, 0);
+
+      finalPnl = totalProfit;
+      setFinalProfitLoss(totalProfit);
+
+      if (typeof addLog === "function") {
+        addLog(
+          `⚠️ Using estimated P/L (Gemini balance unavailable): $${Number(totalProfit).toFixed(2)}`,
+          "warning"
+        );
+        addLog(
+          `Final P/L: $${Number(totalProfit).toFixed(2)} (${Number(totalProfit) >= 0 ? "Profit" : "Loss"})`,
+          Number(totalProfit) >= 0 ? "success" : "error"
+        );
+      }
+    }
+  } else {
+    // Not connected to Gemini — use virtual calc as before
     const totalProfit = selectedModels.reduce((sum, modelId) => {
       let currentValue = 0;
       try {
@@ -1028,86 +1131,46 @@ function Dashboard() {
       return sum + (currentValue - sv);
     }, 0);
 
-    // stop trading flags / state
-    try {
-      setIsTrading(false);
-      setTradingStopped(true);
-      setFinalProfitLoss(totalProfit);
-      setStopReason("Trading stopped manually");
-    } catch (err) {
-      console.warn("Error setting trading state:", err);
-    }
+    finalPnl = totalProfit;
+    setFinalProfitLoss(totalProfit);
 
-    // Immediate log for UX
     if (typeof addLog === "function") {
-      addLog("Trading stopped manually", "info");
       addLog(
         `Final P/L: $${Number(totalProfit).toFixed(2)} (${Number(totalProfit) >= 0 ? "Profit" : "Loss"})`,
         Number(totalProfit) >= 0 ? "success" : "error"
       );
-    } else {
-      console.log("Final P/L:", totalProfit);
     }
+  }
 
-    // Tell server (if socket exists) to stop trading too
+  console.log("✅ Trading stopped. Final P/L:", finalPnl, "| Models still selected:", selectedModels?.length ?? 0);
+
+  // Close Gemini positions (if connected)
+  if (isGeminiConnected) {
     try {
-      if (socket && typeof socket.emit === "function") {
-        socket.emit("stop_trading", { userId: userInfo?.sub });
-      }
-    } catch (err) {
-      console.warn("Error emitting stop_trading", err);
-    }
+      if (typeof addLog === "function") addLog("Closing all Gemini trades...", "info");
 
-    // Clear any pending simulated trade timers (if you keep them in a ref)
-    try {
-      if (tradeTimeoutsRef?.current && tradeTimeoutsRef.current.length) {
-        tradeTimeoutsRef.current.forEach((tid) => {
-          clearTimeout(tid);
-          clearInterval(tid); // Also clear strategy intervals
-        });
-        tradeTimeoutsRef.current = [];
-        if (typeof addLog === "function") addLog("Cleared pending trade timers", "info");
-        console.log("Cleared pending trade timers");
-      }
-    } catch (err) {
-      console.warn("Error clearing trade timers:", err);
-    }
-
-    console.log("✅ Trading stopped. Models still selected:", selectedModels?.length ?? 0);
-
-    // Helper to timeout long-running operations
-    const withTimeout = (p, ms) =>
-      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
-
-    // Close Gemini positions (if connected)
-    if (isGeminiConnected) {
-      try {
-        if (typeof addLog === "function") addLog("Closing all Gemini trades...", "info");
-
-        // Prefer local helper if exists, otherwise call backend endpoint
-        if (typeof handleStopAllGeminiTrading === "function") {
-          await withTimeout(handleStopAllGeminiTrading(), 30_000); // 30s timeout
-        } else {
-          // fallback to API endpoint
-          try {
-            await withTimeout(
-              axios.post('/api/gemini/close-all', { userId: userInfo?.sub }, { timeout: 25_000 }),
-              30_000
-            );
-          } catch (apiErr) {
-            console.warn("Fallback /api/gemini/close-all failed:", apiErr?.message || apiErr);
-            throw apiErr;
-          }
+      if (typeof handleStopAllGeminiTrading === "function") {
+        await withTimeout(handleStopAllGeminiTrading(), 30_000);
+      } else {
+        try {
+          await withTimeout(
+            axios.post('/api/gemini/close-all', { userId: userInfo?.sub }, { timeout: 25_000 }),
+            30_000
+          );
+        } catch (apiErr) {
+          console.warn("Fallback /api/gemini/close-all failed:", apiErr?.message || apiErr);
+          throw apiErr;
         }
-
-        if (typeof addLog === "function") addLog("All Gemini trades closed", "success");
-        console.log("All Gemini trades closed");
-      } catch (err) {
-        console.error("Error closing Gemini trades:", err);
-        if (typeof addLog === "function") addLog(`Error closing Gemini trades: ${err?.message ?? err}`, "error");
       }
+
+      if (typeof addLog === "function") addLog("All Gemini trades closed", "success");
+      console.log("All Gemini trades closed");
+    } catch (err) {
+      console.error("Error closing Gemini trades:", err);
+      if (typeof addLog === "function") addLog(`Error closing Gemini trades: ${err?.message ?? err}`, "error");
     }
-  };
+  }
+};
 
   // --- Gemini Trading Logic ---
 

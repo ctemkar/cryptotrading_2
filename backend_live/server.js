@@ -1171,49 +1171,182 @@ app.put('/api/app-state', async (req, res) => {
 // DEBUG helper: paste temporarily into backend/server.js replacing the existing /api/gemini/start-trading handler
 app.post('/api/gemini/start-trading', async (req, res) => {
   try {
-    const { userId, modelId, modelName, startValue, stopLoss, profitTarget, isMockTrading = true } = req.body;
+    const {
+      userId,
+      modelId,
+      modelName,
+      startValue,
+      stopLoss,
+      profitTarget,
+      isMockTrading = true
+    } = req.body;
 
     if (!userId || !modelId || !modelName) {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
     const now = Date.now();
-    const sessionJson = JSON.stringify({ modelId, modelName, startValue, stopLoss, profitTarget, isMockTrading, startedAt: now });
+
+    // ✅ Step 2: capture REAL Gemini start balance (only for real trading)
+    let startBalanceUsd = null;
+    let geminiEnv = 'live';
+
+    if (!isMockTrading) {
+      try {
+        const [credRows] = await db.query(
+          'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+          [userId]
+        );
+
+        if (credRows.length) {
+          const cred = credRows[0];
+          geminiEnv = cred.env || 'live';
+
+          const apiSecret = decrypt(cred.api_secret_enc, cred.iv, cred.auth_tag);
+
+          // Gemini balances = list of currencies with amounts
+          const balances = await geminiRequest(
+            cred.api_key,
+            apiSecret,
+            '/v1/balances',
+            { env: geminiEnv }
+          );
+
+          const stable = new Set(['usd', 'usdc', 'gusd']);
+
+          // Build list of non-stable currencies we actually hold
+          const heldCurrencies = Array.from(
+            new Set(
+              (balances || [])
+                .map(b => (b.currency || '').toLowerCase())
+                .filter(c => c && !stable.has(c))
+            )
+          );
+
+          // Fetch USD prices for each held currency in parallel: e.g. btc -> btcusd
+          const priceMap = {};
+          await Promise.all(
+            heldCurrencies.map(async (cur) => {
+              try {
+                const symbol = `${cur}usd`; // gemini symbols look like "btcusd"
+                const px = await getGeminiPrice(symbol, geminiEnv);
+                if (typeof px === 'number' && Number.isFinite(px)) priceMap[cur] = px;
+              } catch (e) {
+                // If Gemini doesn't have curusd or request fails, skip
+              }
+            })
+          );
+
+          // Compute total equity in USD (this will match portfolio-style math way closer)
+          let totalUsd = 0;
+          for (const b of (balances || [])) {
+            const cur = (b.currency || '').toLowerCase();
+            // Prefer total "amount" (equity) if present; fallback to available
+            const amt = parseFloat(b.amount ?? b.available ?? 0);
+
+            if (!cur || !Number.isFinite(amt) || amt <= 0) continue;
+
+            if (stable.has(cur)) {
+              totalUsd += amt;
+            } else {
+              const px = priceMap[cur];
+              if (typeof px === 'number' && Number.isFinite(px)) {
+                totalUsd += amt * px;
+              }
+            }
+          }
+
+          startBalanceUsd = parseFloat(totalUsd.toFixed(2));
+        } else {
+          // No creds on file — real trading will likely fail later, but don't hard-crash start
+          startBalanceUsd = null;
+        }
+      } catch (balErr) {
+        console.error('⚠️ Failed to capture Gemini start balance:', balErr.message);
+        startBalanceUsd = null;
+      }
+    }
+
+    const sessionJson = JSON.stringify({
+      modelId,
+      modelName,
+      startValue,
+      stopLoss,
+      profitTarget,
+      isMockTrading,
+      startedAt: now,
+      geminiEnv,
+      startBalanceUsd
+    });
 
     // Update session
-    await db.query(
-      `INSERT INTO user_trading_session (user_id, is_active, started_at, session_json, updated_at)
-       VALUES (?, 1, NOW(), ?, NOW())
-       ON DUPLICATE KEY UPDATE is_active = 1, started_at = NOW(), session_json = ?, updated_at = NOW()`,
-      [userId, sessionJson, sessionJson]
-    );
+    // NOTE: If you've added `start_balance_usd` column, this will store it.
+    // If you haven't, it will gracefully fallback to your old schema.
+    try {
+      await db.query(
+        `INSERT INTO user_trading_session (user_id, is_active, started_at, session_json, start_balance_usd, updated_at)
+         VALUES (?, 1, NOW(), ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           is_active = 1,
+           started_at = NOW(),
+           session_json = ?,
+           start_balance_usd = ?,
+           updated_at = NOW()`,
+        [userId, sessionJson, startBalanceUsd, sessionJson, startBalanceUsd]
+      );
+    } catch (e) {
+      // Fallback if column doesn't exist yet
+      if (e && e.code === 'ER_BAD_FIELD_ERROR') {
+        await db.query(
+          `INSERT INTO user_trading_session (user_id, is_active, started_at, session_json, updated_at)
+           VALUES (?, 1, NOW(), ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             is_active = 1,
+             started_at = NOW(),
+             session_json = ?,
+             updated_at = NOW()`,
+          [userId, sessionJson, sessionJson]
+        );
+      } else {
+        throw e;
+      }
+    }
 
     // Log start
     await db.query(
       'INSERT INTO trade_logs_archive (user_id, message, type, metadata, timestamp) VALUES (?, ?, ?, ?, NOW())',
-      [userId, `Started trading: ${modelName}`, 'info', sessionJson]
+      [
+        userId,
+        !isMockTrading
+          ? `Started trading (REAL): ${modelName}${startBalanceUsd != null ? ` | Start Equity: $${startBalanceUsd}` : ''}`
+          : `Started trading (MOCK): ${modelName}`,
+        'info',
+        sessionJson
+      ]
     );
 
-    // Mock Trade Logic
-    const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
-    const entryPrice = cryptoPrices['BTCUSD'] || 50000;
-    const quantity = (parseFloat(startValue) / entryPrice).toFixed(6);
+    // ✅ Mock Trade Logic should only run in mock mode
+    if (isMockTrading) {
+      const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
+      const entryPrice = cryptoPrices['BTCUSD'] || 50000;
+      const quantity = (parseFloat(startValue) / entryPrice).toFixed(6);
 
-    await db.query(
-      `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [userId, modelId, modelName, side, 'BTCUSD', entryPrice, quantity, startValue, now]
-    );
+      await db.query(
+        `INSERT INTO trades (user_id, model_id, model_name, action, crypto_symbol, crypto_price, quantity, total_value, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [userId, modelId, modelName, side, 'BTCUSD', entryPrice, quantity, startValue, now]
+      );
 
-    if (io) {
-      io.to(`user:${userId}`).emit('log_entry', {
-        message: `Model ${modelName} executed ${side} @ ${entryPrice}`,
-        type: 'trade',
-        time: now
-      });
+      if (io) {
+        io.to(`user:${userId}`).emit('log_entry', {
+          message: `Model ${modelName} executed ${side} @ ${entryPrice}`,
+          type: 'trade',
+          time: now
+        });
+      }
     }
 
-    // ✅ START REAL PER-USER GEMINI SCHEDULER (only if NOT mock trading)
+    // ✅ Start REAL per-user Gemini scheduler (only if NOT mock trading)
     if (!isMockTrading) {
       startTradeGenerationForUser(userId);
       console.log(`🚀 Real Gemini scheduler started for user: ${userId}`);
@@ -1221,10 +1354,98 @@ app.post('/api/gemini/start-trading', async (req, res) => {
       console.log(`🧪 Mock trading mode — scheduler not started for user: ${userId}`);
     }
 
-    res.json({ success: true, message: 'Trading started' });
+    return res.json({
+      success: true,
+      message: 'Trading started',
+      startBalanceUsd
+    });
   } catch (err) {
     console.error('ERROR:', err);
-    res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/gemini/session-pnl', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
+
+    // 1. Get session start balance
+    const [sessionRows] = await db.query(
+      'SELECT start_balance_usd, started_at FROM user_trading_session WHERE user_id = ?',
+      [userId]
+    );
+
+    const startBalanceUsd = sessionRows[0]?.start_balance_usd ?? null;
+    const sessionStartedAt = sessionRows[0]?.started_at ?? null;
+
+    // 2. Get realized P/L from closed trades (SELL actions with pnl recorded)
+    const [closedTrades] = await db.query(
+      `SELECT SUM(pnl) as total_realized_pnl, COUNT(*) as trade_count
+       FROM trades 
+       WHERE user_id = ? AND action = 'SELL' AND pnl IS NOT NULL
+       AND created_at >= ?`,
+      [userId, sessionStartedAt || new Date(0)]
+    );
+
+    const realizedPnl = parseFloat(closedTrades[0]?.total_realized_pnl || 0);
+
+    // 3. Get current Gemini balance for unrealized P/L
+    let currentBalanceUsd = null;
+    let unrealizedPnl = null;
+    let totalPnl = realizedPnl;
+
+    try {
+      const [credRows] = await db.query(
+        'SELECT api_key, api_secret_enc, iv, auth_tag, env FROM user_gemini_credentials WHERE user_id = ?',
+        [userId]
+      );
+
+      if (credRows.length && startBalanceUsd !== null) {
+        const apiSecret = decrypt(credRows[0].api_secret_enc, credRows[0].iv, credRows[0].auth_tag);
+        const balances = await geminiRequest(credRows[0].api_key, apiSecret, '/v1/balances', { env: credRows[0].env || 'live' });
+
+        const [btcPrice, ethPrice, solPrice] = await Promise.all([
+          getGeminiPrice('btcusd', credRows[0].env || 'live'),
+          getGeminiPrice('ethusd', credRows[0].env || 'live'),
+          getGeminiPrice('solusd', credRows[0].env || 'live'),
+        ]);
+
+        let totalUsd = 0;
+        balances.forEach(b => {
+          const amt = parseFloat(b.available || 0);
+          if (amt <= 0) return;
+          const cur = b.currency.toLowerCase();
+          if (cur === 'usd' || cur === 'usdc' || cur === 'gusd') totalUsd += amt;
+          else if (cur === 'btc' && btcPrice) totalUsd += amt * btcPrice;
+          else if (cur === 'eth' && ethPrice) totalUsd += amt * ethPrice;
+          else if (cur === 'sol' && solPrice) totalUsd += amt * solPrice;
+        });
+
+        currentBalanceUsd = parseFloat(totalUsd.toFixed(2));
+        // ✅ THIS is the real P/L — matches Gemini exactly
+        totalPnl = parseFloat((currentBalanceUsd - startBalanceUsd).toFixed(2));
+        unrealizedPnl = parseFloat((totalPnl - realizedPnl).toFixed(2));
+      }
+    } catch (balErr) {
+      console.error('⚠️ Failed to fetch current balance for P/L:', balErr.message);
+    }
+
+    return res.json({
+      success: true,
+      pnl: {
+        startBalanceUsd,
+        currentBalanceUsd,
+        totalPnl,           // ✅ matches Gemini portfolio
+        realizedPnl,        // from closed trades
+        unrealizedPnl,      // from open positions (mark-to-market)
+        tradeCount: parseInt(closedTrades[0]?.trade_count || 0),
+        sessionStartedAt,
+      }
+    });
+  } catch (err) {
+    console.error('❌ /api/gemini/session-pnl error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to compute P/L' });
   }
 });
 
