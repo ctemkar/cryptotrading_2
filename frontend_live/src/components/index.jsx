@@ -15,6 +15,7 @@ import SystemLogs from './SystemLogs';
 //import PositionsTable from './PositionsTable';
 //import MarketTradesTable from './MarketTradesTable';
 import TransactionsTable from './TransactionsTable';
+import RealTimePnlWidget from './RealTimePnlWidget';
 
 // Import your Gemini UI components
 import GeminiLoginModal from './GeminiLoginModal';  // New Gemini login modal
@@ -960,6 +961,44 @@ function Dashboard() {
       }
     }
 
+    // ✅ Snapshot real Gemini balance at session start
+    // NEW — send BOTH flat fields AND sessionData so server handles either shape
+    if (userInfo?.sub) {
+      try {
+        const startResp = await axios.post('/api/gemini/start-trading', {
+          userId: userInfo.sub,
+          modelId: selectedModels[0] || 'multi',
+          modelName: `Session (${selectedModels.length} models)`,
+          startValue: sv,
+          stopLoss: stopLossValue || null,
+          profitTarget: profitTargetValue || null,
+          isMockTrading: false,   // ← always false to capture real balance
+          sessionData: {
+            startValue: sv,
+            stopLoss: stopLossValue || null,
+            profitTarget: profitTargetValue || null,
+            selectedModels,
+            isMockTrading: false,
+          }
+        });
+
+        if (startResp.data?.success) {
+          const bal = startResp.data.startBalanceUsd;
+          addLog(
+            bal != null
+              ? `💰 Session start balance captured: $${bal.toFixed(2)}`
+              : '⚠️ Start balance not available (check Gemini credentials)',
+            bal != null ? 'success' : 'warning'
+          );
+        } else {
+          addLog(`⚠️ start-trading failed: ${startResp.data?.error}`, 'warning');
+        }
+      } catch (err) {
+        addLog(`⚠️ Start balance snapshot failed: ${err.message}`, 'warning');
+        console.error('start-trading error:', err.response?.data || err.message);
+      }
+    }
+
     if (isGeminiConnected) {
       addLog('🔗 Gemini is connected. Executing real trades...', 'info');
 
@@ -1012,7 +1051,7 @@ function Dashboard() {
   };
 
   // --- handleStopTrading ---
-  const handleStopTrading = async () => {
+const handleStopTrading = async () => {
   console.log("🛑 Stopping trade... keeping models:", selectedModels);
 
   // Stop trading flags first for immediate UX feedback
@@ -1910,6 +1949,21 @@ Continue?`
           </span>
         </div>
       </div>
+
+      {isTrading && isGeminiConnected && (
+        <RealTimePnlWidget
+          userId={userInfo?.sub}
+          isTrading={isTrading}
+          onStopLoss={(data) => {
+            addLog(`🛑 Stop loss hit! Balance dropped to $${data.currentBalanceUsd?.toFixed(2)}`, 'error');
+            handleStopTrading();
+          }}
+          onTakeProfit={(data) => {
+            addLog(`🎯 Profit target hit! Balance reached $${data.currentBalanceUsd?.toFixed(2)}`, 'success');
+            handleStopTrading();
+          }}
+        />
+      )}
 
       <TradingControls
         startingValue={startingValue}
